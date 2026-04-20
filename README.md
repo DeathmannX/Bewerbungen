@@ -91,3 +91,7 @@ Das Skript:
 2. Striktere Validierung (Enums, Datumsvalidierung, Constraints)
 3. Frontend modularisieren (Build-Schritt, Komponentenstruktur)
 4. CI ergänzen, falls später gewünscht (z. B. GitHub Actions)
+
+
+---
+*Zuletzt synchronisiert via SSH am 20.04.2026*
