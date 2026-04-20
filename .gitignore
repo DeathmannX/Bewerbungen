@@ -5,3 +5,5 @@ __pycache__/
 bewerbungen.db
 uploads/
 *.pdf
+.env
+
