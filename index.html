@@ -102,6 +102,55 @@
             return <span>{value}</span>;
         };
 
+        const pad2 = (n) => String(n).padStart(2, '0');
+
+        const isValidIsoDate = (value) => {
+            if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+            const [y, m, d] = value.split('-').map(Number);
+            const dt = new Date(y, m - 1, d);
+            return dt.getFullYear() === y && (dt.getMonth() + 1) === m && dt.getDate() === d;
+        };
+
+        const formatIsoDateGerman = (value) => {
+            if (!isValidIsoDate(value)) return null;
+            const [y, m, d] = value.split('-').map(Number);
+            return new Date(y, m - 1, d).toLocaleDateString('de-DE');
+        };
+
+        const historyTimestampToIso = (value) => {
+            if (typeof value !== 'string') return null;
+            const match = value.match(/^(\d{2})\.(\d{2})\.(\d{4})(?:\s+\d{2}:\d{2})?/);
+            if (!match) return null;
+            const iso = `${match[3]}-${match[2]}-${match[1]}`;
+            return isValidIsoDate(iso) ? iso : null;
+        };
+
+        const escapeIcsText = (value) => String(value || "")
+            .replace(/\\/g, "\\\\")
+            .replace(/\r?\n/g, "\\n")
+            .replace(/,/g, "\\,")
+            .replace(/;/g, "\\;");
+
+        const isoToIcsDate = (isoDate) => isoDate.replace(/-/g, "");
+
+        const nextIsoDate = (isoDate) => {
+            if (!isValidIsoDate(isoDate)) return null;
+            const [y, m, d] = isoDate.split('-').map(Number);
+            const next = new Date(y, m - 1, d + 1);
+            return `${next.getFullYear()}-${pad2(next.getMonth() + 1)}-${pad2(next.getDate())}`;
+        };
+
+        const sanitizeFilePart = (value) => String(value || "")
+            .replace(/[^A-Za-z0-9._-]/g, "_")
+            .slice(0, 50) || "termin";
+
+        const calendarDayClass = (isSelected, isToday, eventCount) => {
+            if (isSelected) return "border-white bg-white/10 text-white";
+            if (isToday) return "border-blue-500/80 bg-blue-500/10 text-blue-300";
+            if (eventCount > 0) return "border-brand-border bg-white/5 text-white hover:border-white/40";
+            return "border-brand-border text-brand-muted hover:text-white hover:border-white/20";
+        };
+
         function App() {
             const [apps, setApps] = useState([]);
             const [isModalOpen, setIsModalOpen] = useState(false);
@@ -111,8 +160,15 @@
             const [dateFrom, setDateFrom] = useState('');
             const [dateTo, setDateTo] = useState('');
             const [statusFilter, setStatusFilter] = useState('alle');
+            const [activePage, setActivePage] = useState('dashboard');
+            const [calendarMonth, setCalendarMonth] = useState(() => {
+                const now = new Date();
+                return new Date(now.getFullYear(), now.getMonth(), 1);
+            });
+            const [selectedCalendarDate, setSelectedCalendarDate] = useState(() => new Date().toISOString().split('T')[0]);
 
             const API_BASE = "/api";
+            const todayIso = new Date().toISOString().split('T')[0];
 
             useEffect(() => { fetchData(); }, []);
             const fetchData = async () => {
@@ -158,12 +214,28 @@
                 let txt = "BEWERBUNGSLISTE - EXPORT\n" + "=".repeat(40) + "\n\n";
                 filteredApps.forEach(a => {
                     txt += `DATUM: ${a.dateApplied}\nFIRMA: ${a.company}\nSTELLE: ${a.jobTitle}\nSTATUS: ${a.status.toUpperCase()}\nGEHALT: ${a.salary || '-'}\n`;
+                    const appointmentDate = a.status === 'gemeldet' ? formatIsoDateGerman(a.statusDate) : null;
+                    if (appointmentDate) {
+                        txt += `TERMIN: ${appointmentDate}\n`;
+                    }
                     if (a.history && a.history.length > 0) {
                         txt += "VERLAUF:\n";
                         a.history.forEach(h => txt += `  - [${h.timestamp}] ${h.event}\n`);
                     }
                     txt += "-".repeat(40) + "\n";
                 });
+
+                const appointmentRows = filteredApps
+                    .filter(a => a.status === 'gemeldet' && isValidIsoDate(a.statusDate))
+                    .sort((a, b) => a.statusDate.localeCompare(b.statusDate));
+
+                if (appointmentRows.length > 0) {
+                    txt += "\nTERMINE RUECKMELDUNG\n" + "=".repeat(40) + "\n";
+                    appointmentRows.forEach(a => {
+                        txt += `${formatIsoDateGerman(a.statusDate)} | ${a.company} | ${a.jobTitle}\n`;
+                    });
+                }
+
                 const blob = new Blob([txt], {type: 'text/plain'});
                 const url = URL.createObjectURL(blob);
                 const link = document.createElement('a');
@@ -172,8 +244,149 @@
                 link.click();
             };
 
+            const exportAppointmentToIcs = ({ isoDate, company, jobTitle, statusDetail, statusText }) => {
+                if (!isValidIsoDate(isoDate)) {
+                    alert("Termin konnte nicht exportiert werden: Ungültiges Datum.");
+                    return;
+                }
+
+                const nextDate = nextIsoDate(isoDate);
+                const dtStart = isoToIcsDate(isoDate);
+                const dtEnd = isoToIcsDate(nextDate);
+                const dtStamp = new Date().toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
+                const uid = `${Date.now()}-${Math.random().toString(36).slice(2)}@bewerbungsmanager.local`;
+                const summary = `Rückmeldung: ${jobTitle} - ${company}`;
+                const descriptionLines = [
+                    `Firma: ${company}`,
+                    `Stelle: ${jobTitle}`,
+                    statusDetail ? `Art: ${statusDetail}` : "",
+                    statusText ? `Notiz: ${statusText}` : ""
+                ].filter(Boolean);
+
+                const ics = [
+                    "BEGIN:VCALENDAR",
+                    "VERSION:2.0",
+                    "PRODID:-//Bewerbungs-Manager//DE",
+                    "CALSCALE:GREGORIAN",
+                    "BEGIN:VEVENT",
+                    `UID:${uid}`,
+                    `DTSTAMP:${dtStamp}`,
+                    `DTSTART;VALUE=DATE:${dtStart}`,
+                    `DTEND;VALUE=DATE:${dtEnd}`,
+                    `SUMMARY:${escapeIcsText(summary)}`,
+                    `DESCRIPTION:${escapeIcsText(descriptionLines.join("\n"))}`,
+                    "END:VEVENT",
+                    "END:VCALENDAR"
+                ].join("\r\n");
+
+                const blob = new Blob([ics], { type: "text/calendar;charset=utf-8" });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = `termin_${sanitizeFilePart(company)}_${sanitizeFilePart(jobTitle)}_${isoDate}.ics`;
+                link.click();
+                setTimeout(() => URL.revokeObjectURL(url), 500);
+            };
+
+            const calendarEvents = useMemo(() => {
+                const eventMap = {};
+                const pushEvent = (isoDate, event) => {
+                    if (!isValidIsoDate(isoDate)) return;
+                    if (!eventMap[isoDate]) eventMap[isoDate] = [];
+                    eventMap[isoDate].push(event);
+                };
+
+                apps.forEach(app => {
+                    const historyEntries = Array.isArray(app.history) ? app.history : [];
+                    let hasCreationEvent = false;
+
+                    historyEntries.forEach(entry => {
+                        const eventDate = historyTimestampToIso(entry.timestamp);
+                        if (!eventDate) return;
+
+                        const text = entry.event || "Änderung";
+                        const isCreation = text.toLowerCase().includes("bewerbung erstellt");
+                        if (isCreation) hasCreationEvent = true;
+
+                        pushEvent(eventDate, {
+                            type: isCreation ? "created" : "change",
+                            title: text,
+                            company: app.company,
+                            jobTitle: app.jobTitle
+                        });
+                    });
+
+                    if (!hasCreationEvent && isValidIsoDate(app.dateApplied)) {
+                        pushEvent(app.dateApplied, {
+                            type: "created",
+                            title: "Bewerbung erstellt",
+                            company: app.company,
+                            jobTitle: app.jobTitle
+                        });
+                    }
+
+                    if (app.status === 'gemeldet' && isValidIsoDate(app.statusDate)) {
+                        pushEvent(app.statusDate, {
+                            type: "appointment",
+                            title: "Rückmeldung / Termin",
+                            company: app.company,
+                            jobTitle: app.jobTitle,
+                            statusDate: app.statusDate,
+                            statusDetail: app.statusDetail || "",
+                            statusText: app.statusText || ""
+                        });
+                    }
+                });
+
+                Object.keys(eventMap).forEach(dateKey => {
+                    eventMap[dateKey].sort((a, b) => {
+                        const priority = { appointment: 0, created: 1, change: 2 };
+                        return (priority[a.type] ?? 99) - (priority[b.type] ?? 99);
+                    });
+                });
+
+                return eventMap;
+            }, [apps]);
+
+            const calendarCells = useMemo(() => {
+                const year = calendarMonth.getFullYear();
+                const month = calendarMonth.getMonth();
+                const firstDayIndex = (new Date(year, month, 1).getDay() + 6) % 7;
+                const daysInMonth = new Date(year, month + 1, 0).getDate();
+                const cells = [];
+
+                for (let i = 0; i < firstDayIndex; i++) cells.push(null);
+                for (let day = 1; day <= daysInMonth; day++) {
+                    cells.push({
+                        day,
+                        isoDate: `${year}-${pad2(month + 1)}-${pad2(day)}`
+                    });
+                }
+                return cells;
+            }, [calendarMonth]);
+
+            const selectedDayEvents = calendarEvents[selectedCalendarDate] || [];
+            const calendarLabel = calendarMonth.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' });
+
             return (
                 <div className="max-w-5xl mx-auto px-4 py-12 md:py-20">
+                    <div className="glass-card p-2 rounded-lg mb-8 flex items-center gap-2 w-fit">
+                        <button
+                            onClick={() => setActivePage('dashboard')}
+                            className={`px-4 py-2 rounded text-xs uppercase tracking-wide ${activePage === 'dashboard' ? 'btn-premium' : 'hover:bg-white/5'}`}
+                        >
+                            Dashboard
+                        </button>
+                        <button
+                            onClick={() => setActivePage('cover-letter')}
+                            className={`px-4 py-2 rounded text-xs uppercase tracking-wide ${activePage === 'cover-letter' ? 'btn-premium' : 'hover:bg-white/5'}`}
+                        >
+                            KI Anschreiben
+                        </button>
+                    </div>
+
+                    {activePage === 'dashboard' ? (
+                    <>
                     <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-8 mb-16">
                         <div>
                             <h1 className="text-3xl font-bold tracking-tight text-white mb-2 italic uppercase">Bewerbungs-Manager</h1>
@@ -208,6 +421,100 @@
                             <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} className="bg-transparent text-sm focus:outline-none invert dark:invert-0" />
                         </div>
                     </div>
+
+                    <section className="glass-card p-6 md:p-8 rounded-lg mb-10">
+                        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
+                            <h2 className="text-sm font-bold uppercase tracking-widest text-brand-muted flex items-center gap-2">
+                                <Icon name="calendar-days" size={16} /> Bewerbungs-Kalender
+                            </h2>
+                            <div className="flex items-center gap-3">
+                                <button
+                                    onClick={() => setCalendarMonth(prev => new Date(prev.getFullYear(), prev.getMonth() - 1, 1))}
+                                    className="p-2 rounded border border-brand-border hover:border-white/40"
+                                    title="Vorheriger Monat"
+                                >
+                                    <Icon name="chevron-left" size={16} />
+                                </button>
+                                <span className="text-sm uppercase tracking-wider min-w-[180px] text-center">{calendarLabel}</span>
+                                <button
+                                    onClick={() => setCalendarMonth(prev => new Date(prev.getFullYear(), prev.getMonth() + 1, 1))}
+                                    className="p-2 rounded border border-brand-border hover:border-white/40"
+                                    title="Nächster Monat"
+                                >
+                                    <Icon name="chevron-right" size={16} />
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-7 gap-2 mb-2 text-[10px] uppercase tracking-widest text-brand-muted">
+                            {["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"].map(day => (
+                                <div key={day} className="text-center">{day}</div>
+                            ))}
+                        </div>
+
+                        <div className="grid grid-cols-7 gap-2 mb-6">
+                            {calendarCells.map((cell, idx) => {
+                                if (!cell) return <div key={`empty-${idx}`} className="h-16 rounded border border-transparent"></div>;
+                                const events = calendarEvents[cell.isoDate] || [];
+                                const isSelected = selectedCalendarDate === cell.isoDate;
+                                const isToday = todayIso === cell.isoDate;
+                                return (
+                                    <button
+                                        key={cell.isoDate}
+                                        onClick={() => setSelectedCalendarDate(cell.isoDate)}
+                                        className={`h-16 rounded border transition-colors p-2 ${calendarDayClass(isSelected, isToday, events.length)}`}
+                                    >
+                                        <div className="text-xs font-bold">{cell.day}</div>
+                                        {events.length > 0 && (
+                                            <div className="text-[10px] mt-1">{events.length} Event{events.length > 1 ? 's' : ''}</div>
+                                        )}
+                                    </button>
+                                );
+                            })}
+                        </div>
+
+                        <div className="border-t border-brand-border pt-4">
+                            <div className="text-xs uppercase tracking-widest text-brand-muted mb-3">
+                                Ereignisse am {formatIsoDateGerman(selectedCalendarDate) || selectedCalendarDate}
+                            </div>
+                            {selectedDayEvents.length === 0 ? (
+                                <div className="text-sm text-brand-muted italic">Keine Einträge für diesen Tag.</div>
+                            ) : (
+                                <div className="space-y-2">
+                                    {selectedDayEvents.map((event, idx) => (
+                                        <div key={`${event.type}-${idx}`} className="p-3 rounded border border-brand-border bg-white/5">
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
+                                                    event.type === 'appointment' ? 'bg-yellow-500/10 text-yellow-400' :
+                                                    event.type === 'created' ? 'bg-green-500/10 text-green-400' :
+                                                    'bg-blue-500/10 text-blue-400'
+                                                }`}>
+                                                    {event.type === 'appointment' ? 'Termin' : event.type === 'created' ? 'Erstellt' : 'Änderung'}
+                                                </span>
+                                                <span className="text-xs text-brand-accent/80">{event.title}</span>
+                                            </div>
+                                            <div className="text-sm text-white">{event.company}</div>
+                                            <div className="text-xs text-brand-muted">{event.jobTitle}</div>
+                                            {event.type === 'appointment' && (
+                                                <button
+                                                    onClick={() => exportAppointmentToIcs({
+                                                        isoDate: selectedCalendarDate,
+                                                        company: event.company,
+                                                        jobTitle: event.jobTitle,
+                                                        statusDetail: event.statusDetail,
+                                                        statusText: event.statusText
+                                                    })}
+                                                    className="mt-2 inline-flex items-center gap-1 text-[10px] uppercase tracking-wide border border-brand-border rounded px-2 py-1 hover:border-white/40"
+                                                >
+                                                    <Icon name="calendar-plus" size={12} /> Zum Android-Kalender (.ics)
+                                                </button>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </section>
 
                     <div className="space-y-4">
                         {filteredApps.length === 0 && <div className="text-center py-20 text-brand-muted italic">Keine Einträge gefunden.</div>}
@@ -268,7 +575,25 @@
                                             <div className="mt-4 p-3 bg-white/5 rounded-sm border-l-2 border-brand-border text-xs text-brand-muted italic">
                                                 {app.statusDetail && <span className="font-bold uppercase not-italic mr-2 text-brand-accent/60">{app.statusDetail}:</span>}
                                                 {app.statusText}
-                                                {app.statusDate && <span className="block mt-1 font-bold not-italic text-brand-accent/70">TERMIN: {new Date(app.statusDate).toLocaleDateString('de-DE')}</span>}
+                                                {isValidIsoDate(app.statusDate) && (
+                                                    <span className="block mt-1 font-bold not-italic text-brand-accent/70">
+                                                        TERMIN: {formatIsoDateGerman(app.statusDate)}
+                                                    </span>
+                                                )}
+                                                {app.status === 'gemeldet' && isValidIsoDate(app.statusDate) && (
+                                                    <button
+                                                        onClick={() => exportAppointmentToIcs({
+                                                            isoDate: app.statusDate,
+                                                            company: app.company,
+                                                            jobTitle: app.jobTitle,
+                                                            statusDetail: app.statusDetail,
+                                                            statusText: app.statusText
+                                                        })}
+                                                        className="mt-2 inline-flex items-center gap-1 text-[10px] uppercase tracking-wide border border-brand-border rounded px-2 py-1 not-italic hover:border-white/40"
+                                                    >
+                                                        <Icon name="calendar-plus" size={12} /> Termin als .ics exportieren
+                                                    </button>
+                                                )}
                                             </div>
                                         )}
                                     </div>
@@ -291,6 +616,10 @@
 
                     {isModalOpen && <Modal onClose={() => { setIsModalOpen(false); setEditingApp(null); }} onSave={saveApp} initialData={editingApp} API_BASE={API_BASE} />}
                     {isHistoryOpen && <HistoryModal onClose={() => { setIsHistoryOpen(false); setHistoryApp(null); }} app={historyApp} />}
+                    </>
+                    ) : (
+                    <CoverLetterStudio API_BASE={API_BASE} Icon={Icon} />
+                    )}
                 </div>
             );
         }
@@ -470,6 +799,458 @@
                             </div>
                         </form>
                     </div>
+                </div>
+            );
+        }
+
+        function CoverLetterStudio({ API_BASE, Icon }) {
+            const emptyContext = { company: "", role: "", tasks: "", experiences: "", liked: "", disliked: "", atmosphere: "", notes: "" };
+            const [projects, setProjects] = useState([]);
+            const [projectId, setProjectId] = useState("");
+            const [projectData, setProjectData] = useState(null);
+            const [sourceType, setSourceType] = useState("link");
+            const [sourceValue, setSourceValue] = useState("");
+            const [baselineText, setBaselineText] = useState("");
+            const [baselineFile, setBaselineFile] = useState(null);
+            const [resumeText, setResumeText] = useState("");
+            const [resumeFile, setResumeFile] = useState(null);
+            const [contextEntries, setContextEntries] = useState([{ ...emptyContext }]);
+            const [feedback, setFeedback] = useState("");
+            const [targetScore, setTargetScore] = useState(9);
+            const [maxRounds, setMaxRounds] = useState(6);
+            const [jobConfirmed, setJobConfirmed] = useState(false);
+            const [resumeConfirmed, setResumeConfirmed] = useState(false);
+            const [busy, setBusy] = useState(false);
+            const [message, setMessage] = useState("");
+
+            useEffect(() => {
+                loadProjects();
+            }, []);
+
+            const loadProjects = async () => {
+                try {
+                    const res = await fetch(`${API_BASE}/cover-letter/projects`);
+                    const data = await res.json();
+                    setProjects(data.projects || []);
+                } catch (_err) {
+                    setProjects([]);
+                }
+            };
+
+            const syncFromPayload = (data) => {
+                if (!data || !data.project) return;
+                setProjectId(data.project.id);
+                setProjectData(data);
+                setFeedback(data.project.latestFeedback || "");
+                if (Array.isArray(data.resumeContextEntries) && data.resumeContextEntries.length > 0) {
+                    setContextEntries(data.resumeContextEntries.map(entry => ({
+                        company: entry.company || "",
+                        role: entry.role || "",
+                        tasks: entry.tasks || "",
+                        experiences: entry.experiences || "",
+                        liked: entry.liked || "",
+                        disliked: entry.disliked || "",
+                        atmosphere: entry.atmosphere || "",
+                        notes: entry.notes || "",
+                    })));
+                }
+            };
+
+            const withBusy = async (fn) => {
+                setBusy(true);
+                setMessage("");
+                try {
+                    await fn();
+                } catch (err) {
+                    setMessage(err.message || "Aktion fehlgeschlagen.");
+                } finally {
+                    setBusy(false);
+                }
+            };
+
+            const createProject = async () => {
+                await withBusy(async () => {
+                    const res = await fetch(`${API_BASE}/cover-letter/projects`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ targetScore, maxRounds })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || "Projekt konnte nicht erstellt werden.");
+                    syncFromPayload(data);
+                    await loadProjects();
+                    setMessage("Projekt erstellt.");
+                });
+            };
+
+            const openProject = async (id) => {
+                await withBusy(async () => {
+                    const res = await fetch(`${API_BASE}/cover-letter/projects/${id}`);
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || "Projekt konnte nicht geladen werden.");
+                    syncFromPayload(data);
+                    setMessage("Projekt geladen.");
+                });
+            };
+
+            const saveJobSource = async () => {
+                if (!projectId) {
+                    setMessage("Bitte zuerst ein Projekt erstellen.");
+                    return;
+                }
+                if (!sourceValue.trim()) {
+                    setMessage("Bitte Stellenlink oder Text eintragen.");
+                    return;
+                }
+                await withBusy(async () => {
+                    const res = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/job-source`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ sourceType, sourceValue })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || "Jobquelle konnte nicht gespeichert werden.");
+                    syncFromPayload(data);
+
+                    if (sourceType === "link") {
+                        const analyzeRes = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/analyze-job-link`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({})
+                        });
+                        const analyzeData = await analyzeRes.json();
+                        if (!analyzeRes.ok) throw new Error(analyzeData.detail || "Linkanalyse fehlgeschlagen.");
+                        syncFromPayload(analyzeData);
+                    }
+                    setJobConfirmed(false);
+                    setMessage("Stellenquelle gespeichert und analysiert.");
+                });
+            };
+
+            const analyzeStoredLink = async () => {
+                if (!projectId) {
+                    setMessage("Bitte zuerst ein Projekt erstellen.");
+                    return;
+                }
+                await withBusy(async () => {
+                    const res = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/analyze-job-link`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({})
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || "Linkanalyse fehlgeschlagen.");
+                    syncFromPayload(data);
+                    setJobConfirmed(false);
+                    setMessage("Stellenanalyse aktualisiert.");
+                });
+            };
+
+            const saveBaseline = async () => {
+                if (!projectId) {
+                    setMessage("Bitte zuerst ein Projekt erstellen.");
+                    return;
+                }
+                await withBusy(async () => {
+                    const fd = new FormData();
+                    if (baselineText.trim()) fd.append("text", baselineText);
+                    if (baselineFile) fd.append("file", baselineFile);
+
+                    const res = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/baseline-letter`, {
+                        method: "POST",
+                        body: fd
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || "Anschreiben konnte nicht gespeichert werden.");
+                    syncFromPayload(data);
+                    setMessage("Bestehendes Anschreiben gespeichert.");
+                });
+            };
+
+            const saveResume = async () => {
+                if (!projectId) {
+                    setMessage("Bitte zuerst ein Projekt erstellen.");
+                    return;
+                }
+                await withBusy(async () => {
+                    const fd = new FormData();
+                    if (resumeText.trim()) fd.append("text", resumeText);
+                    if (resumeFile) fd.append("file", resumeFile);
+
+                    const res = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/resume`, {
+                        method: "POST",
+                        body: fd
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || "Lebenslauf konnte nicht verarbeitet werden.");
+                    syncFromPayload(data);
+                    setResumeConfirmed(false);
+                    setMessage("Lebenslauf gespeichert und aufbereitet.");
+                });
+            };
+
+            const saveResumeContext = async () => {
+                if (!projectId) {
+                    setMessage("Bitte zuerst ein Projekt erstellen.");
+                    return;
+                }
+                await withBusy(async () => {
+                    const res = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/resume-context`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ entries: contextEntries })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || "Lebenslauf-Kontext konnte nicht gespeichert werden.");
+                    syncFromPayload(data);
+                    setMessage("Lebenslauf-Kontext gespeichert.");
+                });
+            };
+
+            const saveFeedback = async () => {
+                if (!projectId || !feedback.trim()) {
+                    setMessage("Bitte Projekt und Feedback angeben.");
+                    return;
+                }
+                await withBusy(async () => {
+                    const res = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/feedback`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ feedback })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || "Feedback konnte nicht gespeichert werden.");
+                    syncFromPayload(data);
+                    setMessage("Feedback gespeichert.");
+                });
+            };
+
+            const generateDraft = async () => {
+                if (!projectId) {
+                    setMessage("Bitte zuerst ein Projekt erstellen.");
+                    return;
+                }
+                if (!jobConfirmed || !resumeConfirmed) {
+                    setMessage("Bitte Stellenanalyse und Lebenslaufprüfung bestätigen.");
+                    return;
+                }
+                await withBusy(async () => {
+                    const res = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/generate`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ targetScore, maxRounds })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || "Generierung fehlgeschlagen.");
+                    syncFromPayload(data);
+                    setMessage(`Anschreiben erstellt. Finaler Score: ${data.result?.finalScore ?? "-"}`);
+                });
+            };
+
+            const iterateDraft = async () => {
+                if (!projectId) {
+                    setMessage("Bitte zuerst ein Projekt erstellen.");
+                    return;
+                }
+                await withBusy(async () => {
+                    const res = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/iterate`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ targetScore, maxRounds, feedback })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || "Iteration fehlgeschlagen.");
+                    syncFromPayload(data);
+                    setMessage(`Iteration abgeschlossen. Finaler Score: ${data.result?.finalScore ?? "-"}`);
+                });
+            };
+
+            const addContextEntry = () => setContextEntries(prev => [...prev, { ...emptyContext }]);
+            const removeContextEntry = (idx) => setContextEntries(prev => prev.filter((_, i) => i !== idx));
+            const setContextField = (idx, key, value) => {
+                setContextEntries(prev => prev.map((entry, i) => i === idx ? { ...entry, [key]: value } : entry));
+            };
+
+            const exportTxt = () => {
+                if (!projectId) {
+                    setMessage("Bitte zuerst ein Projekt erstellen.");
+                    return;
+                }
+                window.open(`${API_BASE}/cover-letter/projects/${projectId}/export/txt`, "_blank");
+            };
+
+            const analysis = projectData?.sources?.jobAnalysis || {};
+            const resumeSummary = projectData?.sources?.resumeSummary || {};
+            const iterations = projectData?.iterations || [];
+            const latestDraft = projectData?.project?.latestDraft || "";
+            const latestScore = projectData?.project?.latestScore || 0;
+
+            return (
+                <div className="space-y-8">
+                    <section className="glass-card p-6 rounded-lg space-y-4">
+                        <h2 className="text-sm font-bold uppercase tracking-widest text-brand-muted flex items-center gap-2">
+                            <Icon name="sparkles" size={16} /> KI Anschreiben Studio
+                        </h2>
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                            <input
+                                type="number"
+                                min="1"
+                                max="10"
+                                step="0.1"
+                                value={targetScore}
+                                onChange={e => setTargetScore(parseFloat(e.target.value) || 9)}
+                                className="input-premium p-2 rounded text-sm"
+                                placeholder="Zielscore"
+                            />
+                            <input
+                                type="number"
+                                min="1"
+                                max="20"
+                                value={maxRounds}
+                                onChange={e => setMaxRounds(parseInt(e.target.value, 10) || 6)}
+                                className="input-premium p-2 rounded text-sm"
+                                placeholder="Max Runden"
+                            />
+                            <button onClick={createProject} className="btn-premium px-4 py-2 rounded text-xs uppercase tracking-wide">Neues Projekt</button>
+                            <button onClick={loadProjects} className="glass-card px-4 py-2 rounded text-xs uppercase tracking-wide">Projekte laden</button>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                            {projects.map(p => (
+                                <button
+                                    key={p.id}
+                                    onClick={() => openProject(p.id)}
+                                    className={`px-3 py-1.5 rounded text-xs border ${projectId === p.id ? 'border-white text-white' : 'border-brand-border text-brand-muted hover:text-white'}`}
+                                >
+                                    {p.id.slice(0, 8)} • Score {Number(p.latestScore || 0).toFixed(1)}
+                                </button>
+                            ))}
+                        </div>
+                        {projectId && <div className="text-xs text-brand-muted">Aktives Projekt: {projectId}</div>}
+                        {message && <div className="text-xs text-blue-300">{message}</div>}
+                    </section>
+
+                    <section className="glass-card p-6 rounded-lg space-y-4">
+                        <h3 className="text-xs font-bold uppercase tracking-widest text-brand-muted">1) Stelle und Unternehmenskontext</h3>
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                            <select value={sourceType} onChange={e => setSourceType(e.target.value)} className="input-premium p-2 rounded text-sm">
+                                <option value="link">Link</option>
+                                <option value="text">Anzeigentext</option>
+                            </select>
+                            <input
+                                value={sourceValue}
+                                onChange={e => setSourceValue(e.target.value)}
+                                className="input-premium p-2 rounded text-sm md:col-span-2"
+                                placeholder={sourceType === 'link' ? 'https://...' : 'Text aus der Stellenanzeige einfügen'}
+                            />
+                            <button disabled={busy} onClick={saveJobSource} className="btn-premium px-4 py-2 rounded text-xs uppercase tracking-wide">
+                                Quelle speichern
+                            </button>
+                        </div>
+                        <button disabled={busy || !projectId} onClick={analyzeStoredLink} className="glass-card px-4 py-2 rounded text-xs uppercase tracking-wide">
+                            Linkanalyse erneut ausführen
+                        </button>
+                        <div className="p-3 rounded border border-brand-border bg-white/5 text-sm space-y-1">
+                            <div><strong>Firma:</strong> {analysis.companyName || "-"}</div>
+                            <div><strong>Stelle:</strong> {analysis.jobTitle || "-"}</div>
+                            <div><strong>Kundentyp:</strong> {analysis.isTempWork ? "Zeitarbeit" : "Reguläre Firma/Unklar"}</div>
+                            <div><strong>Kunden:</strong> {analysis.customers || "-"}</div>
+                            <div><strong>Unternehmensprofil:</strong> {analysis.companySummary || "-"}</div>
+                            <div><strong>Anforderungen:</strong> {(analysis.requirements || []).join(" | ") || "-"}</div>
+                        </div>
+                        <label className="flex items-center gap-2 text-xs text-brand-muted">
+                            <input type="checkbox" checked={jobConfirmed} onChange={e => setJobConfirmed(e.target.checked)} />
+                            Analyse geprüft und bestätigt
+                        </label>
+                    </section>
+
+                    <section className="glass-card p-6 rounded-lg space-y-4">
+                        <h3 className="text-xs font-bold uppercase tracking-widest text-brand-muted">2) Bisheriges Anschreiben</h3>
+                        <textarea value={baselineText} onChange={e => setBaselineText(e.target.value)} rows="6" className="input-premium w-full p-3 rounded text-sm" placeholder="Bestehendes Anschreiben hier einfügen..." />
+                        <input type="file" accept=".txt" onChange={e => setBaselineFile(e.target.files?.[0] || null)} className="text-xs text-brand-muted" />
+                        <button disabled={busy || !projectId} onClick={saveBaseline} className="btn-premium px-4 py-2 rounded text-xs uppercase tracking-wide">
+                            Anschreiben speichern
+                        </button>
+                    </section>
+
+                    <section className="glass-card p-6 rounded-lg space-y-4">
+                        <h3 className="text-xs font-bold uppercase tracking-widest text-brand-muted">3) Lebenslauf + Sichtkontrolle</h3>
+                        <textarea value={resumeText} onChange={e => setResumeText(e.target.value)} rows="6" className="input-premium w-full p-3 rounded text-sm" placeholder="Lebenslauftext hier einfügen..." />
+                        <input type="file" accept=".txt,.pdf" onChange={e => setResumeFile(e.target.files?.[0] || null)} className="text-xs text-brand-muted" />
+                        <button disabled={busy || !projectId} onClick={saveResume} className="btn-premium px-4 py-2 rounded text-xs uppercase tracking-wide">
+                            Lebenslauf verarbeiten
+                        </button>
+                        <div className="p-3 rounded border border-brand-border bg-white/5 text-sm space-y-1">
+                            <div><strong>Zeichen:</strong> {resumeSummary.characterCount || 0}</div>
+                            <div><strong>Stationen:</strong> {(resumeSummary.stationHints || []).join(" | ") || "-"}</div>
+                            <div><strong>Skills:</strong> {(resumeSummary.skills || []).join(", ") || "-"}</div>
+                        </div>
+                        <label className="flex items-center gap-2 text-xs text-brand-muted">
+                            <input type="checkbox" checked={resumeConfirmed} onChange={e => setResumeConfirmed(e.target.checked)} />
+                            Lebenslaufdaten geprüft und bestätigt
+                        </label>
+                    </section>
+
+                    <section className="glass-card p-6 rounded-lg space-y-4">
+                        <h3 className="text-xs font-bold uppercase tracking-widest text-brand-muted">4) Kontext pro Station</h3>
+                        <div className="space-y-3">
+                            {contextEntries.map((entry, idx) => (
+                                <div key={idx} className="p-3 rounded border border-brand-border bg-white/5 space-y-2">
+                                    <div className="flex justify-between items-center">
+                                        <div className="text-xs font-bold uppercase text-brand-muted">Station {idx + 1}</div>
+                                        {contextEntries.length > 1 && (
+                                            <button onClick={() => removeContextEntry(idx)} className="text-xs text-red-400 hover:text-red-300">Entfernen</button>
+                                        )}
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                        <input value={entry.company} onChange={e => setContextField(idx, "company", e.target.value)} className="input-premium p-2 rounded text-sm" placeholder="Firma" />
+                                        <input value={entry.role} onChange={e => setContextField(idx, "role", e.target.value)} className="input-premium p-2 rounded text-sm" placeholder="Rolle" />
+                                        <input value={entry.tasks} onChange={e => setContextField(idx, "tasks", e.target.value)} className="input-premium p-2 rounded text-sm" placeholder="Aufgaben" />
+                                        <input value={entry.experiences} onChange={e => setContextField(idx, "experiences", e.target.value)} className="input-premium p-2 rounded text-sm" placeholder="Erlebnisse" />
+                                        <input value={entry.liked} onChange={e => setContextField(idx, "liked", e.target.value)} className="input-premium p-2 rounded text-sm" placeholder="Was hat Spaß gemacht?" />
+                                        <input value={entry.disliked} onChange={e => setContextField(idx, "disliked", e.target.value)} className="input-premium p-2 rounded text-sm" placeholder="Was war schwierig?" />
+                                        <input value={entry.atmosphere} onChange={e => setContextField(idx, "atmosphere", e.target.value)} className="input-premium p-2 rounded text-sm" placeholder="Atmosphäre" />
+                                        <input value={entry.notes} onChange={e => setContextField(idx, "notes", e.target.value)} className="input-premium p-2 rounded text-sm" placeholder="Sonstige Notizen" />
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={addContextEntry} className="glass-card px-4 py-2 rounded text-xs uppercase tracking-wide">Station hinzufügen</button>
+                            <button disabled={busy || !projectId} onClick={saveResumeContext} className="btn-premium px-4 py-2 rounded text-xs uppercase tracking-wide">Kontext speichern</button>
+                        </div>
+                    </section>
+
+                    <section className="glass-card p-6 rounded-lg space-y-4">
+                        <h3 className="text-xs font-bold uppercase tracking-widest text-brand-muted">5) Generierung, Feedback, Iteration</h3>
+                        <textarea value={feedback} onChange={e => setFeedback(e.target.value)} rows="4" className="input-premium w-full p-3 rounded text-sm" placeholder="Feedback oder zusätzliche Vorgaben..." />
+                        <div className="flex flex-wrap gap-2">
+                            <button disabled={busy || !projectId} onClick={saveFeedback} className="glass-card px-4 py-2 rounded text-xs uppercase tracking-wide">Feedback speichern</button>
+                            <button disabled={busy || !projectId} onClick={generateDraft} className="btn-premium px-4 py-2 rounded text-xs uppercase tracking-wide">Anschreiben generieren</button>
+                            <button disabled={busy || !projectId} onClick={iterateDraft} className="btn-premium px-4 py-2 rounded text-xs uppercase tracking-wide">Auto-Iteration starten</button>
+                            <button disabled={!projectId} onClick={exportTxt} className="glass-card px-4 py-2 rounded text-xs uppercase tracking-wide">TXT exportieren</button>
+                        </div>
+                        <div className="text-xs text-brand-muted">Finaler Score: {Number(latestScore || 0).toFixed(2)}</div>
+                        <textarea readOnly value={latestDraft} rows="10" className="input-premium w-full p-3 rounded text-sm" placeholder="Hier erscheint das aktuelle Anschreiben..." />
+                    </section>
+
+                    <section className="glass-card p-6 rounded-lg space-y-3">
+                        <h3 className="text-xs font-bold uppercase tracking-widest text-brand-muted">6) Iterationsverlauf</h3>
+                        {iterations.length === 0 ? (
+                            <div className="text-sm text-brand-muted italic">Noch keine Iterationen vorhanden.</div>
+                        ) : (
+                            <div className="space-y-2">
+                                {iterations.slice().reverse().map((it) => (
+                                    <div key={it.id} className="p-3 rounded border border-brand-border bg-white/5">
+                                        <div className="text-xs text-brand-muted mb-1">Runde {it.roundIndex} • Score {Number(it.scoreTotal || 0).toFixed(2)}</div>
+                                        <div className="text-sm text-white mb-1">{it.rationale || "-"}</div>
+                                        <div className="text-xs text-brand-muted">
+                                            Verbesserungen: {(it.improvementHints || []).join(" | ") || "-"}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </section>
                 </div>
             );
         }

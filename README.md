@@ -45,9 +45,9 @@ Der Bewerbungs-Manager ist ein lokales Tool zur strukturierten Erfassung und Nac
 ## Schwachstellen (Ist-Stand)
 
 ### 1) Sicherheit
-- `CORS` ist sehr offen (`allow_origins=["*"]` + `allow_credentials=True`), was für produktive Umgebungen riskant ist.
+- `CORS` wurde auf explizite Origins gehärtet (konfigurierbar über `CORS_ALLOW_ORIGINS`), aber es gibt weiterhin keine Authentifizierung.
 - Es gibt keine Authentifizierung/Autorisierung für API und PDF-Zugriff.
-- Upload-Endpoint akzeptiert Dateien ohne serverseitige Dateityp-/Größenprüfung.
+- Upload-Endpoint prüft inzwischen Dateiendung, MIME-Type und Größenlimit (`MAX_UPLOAD_SIZE_BYTES`).
 
 ### 2) Robustheit und Fehlerbehandlung
 - DB-Migration nutzt ein breites `except: pass`; echte Fehler werden verschluckt.
@@ -55,8 +55,8 @@ Der Bewerbungs-Manager ist ein lokales Tool zur strukturierten Erfassung und Nac
 - Bei PDF-Parsing-Fehlern wird nur geloggt; der API-Response bleibt heuristisch und unklar bezüglich Fehlerursache.
 
 ### 3) Datenqualität und Domänenregeln
-- Mehrere Felder (z. B. `dateApplied`, `status`) sind freie Strings ohne enge Validierung.
-- Statuswerte werden implizit erwartet (`offen`, `gemeldet`, `absage`), aber nicht als Enum abgesichert.
+- `dateApplied` und `statusDate` werden als Datum validiert.
+- `status` ist als Enum (`offen`, `gemeldet`, `absage`) abgesichert.
 - History-Einträge basieren auf einfacher Textlogik statt strukturierter Änderungsobjekte.
 
 ### 4) Betriebs- und Entwicklungsreife
@@ -74,7 +74,8 @@ Die Datei [`tests/test_api.py`](./tests/test_api.py) prüft die Backend-Kernfäl
 - `PUT` auf unbekannte ID (`404`)
 - `DELETE /api/applications/{id}`
 - `POST /api/extract` mit gemockter PDF-Auslese
-- Request-Validierung (`422` bei unvollständiger Payload)
+- Request-Validierung (`422` bei unvollständiger Payload, ungültigem Status oder ungültigem Datum)
+- Upload-Validierung (`415` bei falschem MIME-Type, `413` bei zu großer Datei)
 
 ### Pipeline lokal starten
 ```bash
@@ -87,10 +88,11 @@ Das Skript:
 3. führt `pytest` über `tests/` aus
 
 ## Nächste sinnvolle Ausbauschritte
-1. Sicherheits-Härtung (Auth, CORS-Whitelist, Upload-Limits)
-2. Striktere Validierung (Enums, Datumsvalidierung, Constraints)
-3. Frontend modularisieren (Build-Schritt, Komponentenstruktur)
-4. CI ergänzen, falls später gewünscht (z. B. GitHub Actions)
+1. Authentifizierung/Autorisierung ergänzen (z. B. Token oder Basic Auth im Intranet)
+2. DB-Migration robuster machen (`except: pass` entfernen, Fehler gezielt behandeln)
+3. Validierung weiter schärfen (z. B. Feldlängen, optionale Geschäftsregeln je Status)
+4. Frontend modularisieren (Build-Schritt, Komponentenstruktur)
+5. CI ergänzen, falls später gewünscht (z. B. GitHub Actions)
 
 
 ---

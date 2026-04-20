@@ -132,3 +132,37 @@ def test_create_application_validation_error(client):
     response = client.post("/api/applications", json={"company": "X"})
 
     assert response.status_code == 422
+
+
+def test_create_application_invalid_status_returns_422(client):
+    response = client.post("/api/applications", json=_payload(status="in_pruefung"))
+
+    assert response.status_code == 422
+
+
+def test_create_application_invalid_date_returns_422(client):
+    response = client.post("/api/applications", json=_payload(dateApplied="20.04.2026"))
+
+    assert response.status_code == 422
+
+
+def test_extract_rejects_invalid_content_type(client):
+    response = client.post(
+        "/api/extract",
+        files={"file": ("bewerbung.pdf", b"not-a-pdf", "text/plain")},
+    )
+
+    assert response.status_code == 415
+    assert response.json()["detail"] == "Ungültiger Dateityp"
+
+
+def test_extract_rejects_too_large_file(client, monkeypatch):
+    monkeypatch.setattr(api, "MAX_UPLOAD_SIZE_BYTES", 8)
+
+    response = client.post(
+        "/api/extract",
+        files={"file": ("bewerbung.pdf", b"%PDF-1.4-more-than-8-bytes", "application/pdf")},
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Datei zu groß"
