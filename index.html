@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="de" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bewerbungs-Manager | Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: { 
+                        brand: {
+                            bg: '#050505',
+                            card: '#0d0d0d',
+                            border: '#1a1a1a',
+                            muted: '#888888',
+                            accent: '#ffffff'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        body { 
+            background-color: #050505; 
+            color: #e5e5e5; 
+            font-family: 'Inter', sans-serif;
+            -webkit-font-smoothing: antialiased;
+        }
+        .glass-card { 
+            background: #0d0d0d; 
+            border: 1px solid #1a1a1a; 
+            transition: all 0.2s ease-in-out;
+        }
+        .glass-card:hover {
+            border-color: #333;
+            background: #111;
+        }
+        .status-indicator {
+            width: 4px;
+            height: 100%;
+            position: absolute;
+            left: 0;
+            top: 0;
+            border-radius: 4px 0 0 4px;
+        }
+        .btn-premium {
+            background: #ffffff;
+            color: #000000;
+            font-weight: 600;
+            transition: opacity 0.2s;
+        }
+        .btn-premium:hover { opacity: 0.9; }
+        .input-premium {
+            background: #0d0d0d;
+            border: 1px solid #1a1a1a;
+            color: #fff;
+        }
+        .input-premium:focus { border-color: #444; outline: none; }
+        
+        [data-lucide] {
+            stroke: currentColor;
+            color: #a3a3a3;
+        }
+        
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #050505; }
+        ::-webkit-scrollbar-thumb { background: #1a1a1a; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        const Icon = ({ name, size = 16, className = "" }) => {
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [name]);
+            return <i data-lucide={name} style={{width: size, height: size}} className={className}></i>;
+        };
+
+        const PlatformLink = ({ value }) => {
+            if (!value) return <span className="text-brand-muted italic">Direktbewerbung</span>;
+            const isUrl = value.match(/^(https?:\/\/|www\.)[^\s]+/i);
+            const href = value.startsWith('www.') ? `https://${value}` : value;
+            
+            if (isUrl) {
+                return (
+                    <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline flex items-center gap-1">
+                        {value.length > 25 ? value.substring(0, 25) + '...' : value}
+                        <Icon name="external-link" size={12} className="text-blue-400" />
+                    </a>
+                );
+            }
+            return <span>{value}</span>;
+        };
+
+        function App() {
+            const [apps, setApps] = useState([]);
+            const [isModalOpen, setIsModalOpen] = useState(false);
+            const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+            const [editingApp, setEditingApp] = useState(null);
+            const [historyApp, setHistoryApp] = useState(null);
+            const [dateFrom, setDateFrom] = useState('');
+            const [dateTo, setDateTo] = useState('');
+            const [statusFilter, setStatusFilter] = useState('alle');
+
+            const API_BASE = "/api";
+
+            useEffect(() => { fetchData(); }, []);
+            const fetchData = async () => {
+                try {
+                    const res = await fetch(`${API_BASE}/applications`);
+                    const data = await res.json();
+                    setApps(data);
+                } catch (err) { console.error(err); }
+            };
+
+            const saveApp = async (formData) => {
+                const method = formData.id ? "PUT" : "POST";
+                const url = formData.id ? `${API_BASE}/applications/${formData.id}` : `${API_BASE}/applications`;
+                try {
+                    await fetch(url, {
+                        method,
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(formData)
+                    });
+                    fetchData();
+                    setIsModalOpen(false);
+                    setEditingApp(null);
+                } catch (err) { alert("Speichern fehlgeschlagen"); }
+            };
+
+            const deleteApp = async (id) => {
+                if (!confirm("Eintrag unwiderruflich löschen?")) return;
+                await fetch(`${API_BASE}/applications/${id}`, { method: "DELETE" });
+                fetchData();
+            };
+
+            const filteredApps = useMemo(() => {
+                return apps.filter(app => {
+                    const appDate = app.dateApplied;
+                    if (dateFrom && appDate < dateFrom) return false;
+                    if (dateTo && appDate > dateTo) return false;
+                    if (statusFilter !== 'alle' && app.status !== statusFilter) return false;
+                    return true;
+                }).sort((a, b) => b.dateApplied.localeCompare(a.dateApplied));
+            }, [apps, dateFrom, dateTo, statusFilter]);
+
+            const exportTxt = () => {
+                let txt = "BEWERBUNGSLISTE - EXPORT\n" + "=".repeat(40) + "\n\n";
+                filteredApps.forEach(a => {
+                    txt += `DATUM: ${a.dateApplied}\nFIRMA: ${a.company}\nSTELLE: ${a.jobTitle}\nSTATUS: ${a.status.toUpperCase()}\nGEHALT: ${a.salary || '-'}\n`;
+                    if (a.history && a.history.length > 0) {
+                        txt += "VERLAUF:\n";
+                        a.history.forEach(h => txt += `  - [${h.timestamp}] ${h.event}\n`);
+                    }
+                    txt += "-".repeat(40) + "\n";
+                });
+                const blob = new Blob([txt], {type: 'text/plain'});
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `bewerbungen_${new Date().toISOString().split('T')[0]}.txt`;
+                link.click();
+            };
+
+            return (
+                <div className="max-w-5xl mx-auto px-4 py-12 md:py-20">
+                    <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-8 mb-16">
+                        <div>
+                            <h1 className="text-3xl font-bold tracking-tight text-white mb-2 italic uppercase">Bewerbungs-Manager</h1>
+                            <div className="flex items-center gap-2 text-brand-muted text-sm">
+                                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                                System aktiv • {filteredApps.length} Einträge im Zeitraum
+                            </div>
+                        </div>
+                        <div className="flex gap-3">
+                            <button onClick={exportTxt} className="glass-card px-5 py-2.5 rounded text-sm font-medium flex items-center gap-2 hover:bg-white/5 transition-colors">
+                                <Icon name="file-text" /> Export
+                            </button>
+                            <button onClick={() => { setEditingApp(null); setIsModalOpen(true); }} className="btn-premium px-6 py-2.5 rounded text-sm flex items-center gap-2">
+                                <Icon name="plus" /> Neuer Eintrag
+                            </button>
+                        </div>
+                    </header>
+
+                    <div className="glass-card p-2 rounded-lg mb-10 flex flex-wrap items-center gap-4">
+                        <div className="flex items-center gap-2 px-3 py-1.5 border-r border-brand-border">
+                            <Icon name="filter" size={14} className="text-brand-muted" />
+                            <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="bg-transparent text-sm focus:outline-none cursor-pointer">
+                                <option value="alle">Alle Status</option>
+                                <option value="offen">Offen</option>
+                                <option value="gemeldet">Rückmeldung</option>
+                                <option value="absage">Absage</option>
+                            </select>
+                        </div>
+                        <div className="flex items-center gap-3 px-3">
+                            <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} className="bg-transparent text-sm focus:outline-none invert dark:invert-0" />
+                            <span className="text-brand-muted text-[10px] font-bold">BIS</span>
+                            <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} className="bg-transparent text-sm focus:outline-none invert dark:invert-0" />
+                        </div>
+                    </div>
+
+                    <div className="space-y-4">
+                        {filteredApps.length === 0 && <div className="text-center py-20 text-brand-muted italic">Keine Einträge gefunden.</div>}
+                        {filteredApps.map(app => (
+                            <div key={app.id} className="glass-card p-6 rounded relative overflow-hidden group">
+                                <div className={`status-indicator ${
+                                    app.status === 'offen' ? 'bg-blue-500' : 
+                                    app.status === 'absage' ? 'bg-red-500' : 'bg-yellow-500'
+                                }`}></div>
+                                
+                                <div className="flex flex-col md:flex-row justify-between gap-6">
+                                    <div className="flex-1">
+                                        <div className="flex items-center gap-3 mb-2">
+                                            <span className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">
+                                                {new Date(app.dateApplied).toLocaleDateString('de-DE')}
+                                            </span>
+                                            <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ${
+                                                app.status === 'offen' ? 'bg-blue-500/10 text-blue-400' : 
+                                                app.status === 'absage' ? 'bg-red-500/10 text-red-400' : 'bg-yellow-500/10 text-yellow-400'
+                                            }`}>
+                                                {app.status}
+                                            </span>
+                                        </div>
+                                        
+                                        <h3 className="text-xl font-bold text-white group-hover:text-blue-400 transition-colors mb-1 flex items-center gap-3">
+                                            {app.jobTitle}
+                                            {app.isTempWork && (
+                                                <span className="flex items-center gap-1 text-[10px] bg-red-500/10 text-red-500 border border-red-500/20 px-2 py-0.5 rounded uppercase tracking-tighter">
+                                                    <Icon name="alert-circle" size={12} className="text-red-500" />
+                                                    Zeitarbeit
+                                                </span>
+                                            )}
+                                        </h3>
+                                        <p className="text-lg text-brand-accent/80 font-medium mb-4">{app.company}</p>
+                                        
+                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                                            <div className="flex items-center gap-2 text-brand-muted">
+                                                <Icon name="link" size={14} />
+                                                <PlatformLink value={app.platform} />
+                                            </div>
+                                            {app.salary && (
+                                                <div className="flex items-center gap-2 text-brand-muted">
+                                                    <Icon name="banknote" size={14} className="text-green-500/60" />
+                                                    <span className="text-green-400/80 font-medium">{app.salary}</span>
+                                                </div>
+                                            )}
+                                            {(app.shifts.morning || app.shifts.late || app.shifts.night) && (
+                                                <div className="flex items-center gap-2 text-brand-muted">
+                                                    <Icon name="clock" size={14} />
+                                                    <span className="text-xs">
+                                                        {[app.shifts.morning && 'Früh', app.shifts.late && 'Spät', app.shifts.night && 'Nacht'].filter(Boolean).join('/')}
+                                                    </span>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {(app.statusDetail || app.statusText || app.statusDate) && (
+                                            <div className="mt-4 p-3 bg-white/5 rounded-sm border-l-2 border-brand-border text-xs text-brand-muted italic">
+                                                {app.statusDetail && <span className="font-bold uppercase not-italic mr-2 text-brand-accent/60">{app.statusDetail}:</span>}
+                                                {app.statusText}
+                                                {app.statusDate && <span className="block mt-1 font-bold not-italic text-brand-accent/70">TERMIN: {new Date(app.statusDate).toLocaleDateString('de-DE')}</span>}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="flex md:flex-col justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                        <button onClick={() => { setHistoryApp(app); setIsHistoryOpen(true); }} className="p-2 hover:bg-white/10 rounded transition-colors text-brand-muted hover:text-white" title="Verlauf anzeigen">
+                                            <Icon name="history" size={18} />
+                                        </button>
+                                        <button onClick={() => { setEditingApp(app); setIsModalOpen(true); }} className="p-2 hover:bg-white/10 rounded transition-colors text-brand-muted hover:text-white">
+                                            <Icon name="edit" size={18} />
+                                        </button>
+                                        <button onClick={() => deleteApp(app.id)} className="p-2 hover:bg-red-500/10 rounded transition-colors text-brand-muted hover:text-red-500">
+                                            <Icon name="trash-2" size={18} />
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    {isModalOpen && <Modal onClose={() => { setIsModalOpen(false); setEditingApp(null); }} onSave={saveApp} initialData={editingApp} API_BASE={API_BASE} />}
+                    {isHistoryOpen && <HistoryModal onClose={() => { setIsHistoryOpen(false); setHistoryApp(null); }} app={historyApp} />}
+                </div>
+            );
+        }
+
+        function HistoryModal({ onClose, app }) {
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-md">
+                    <div className="glass-card w-full max-w-lg rounded-lg p-10">
+                        <h2 className="text-xl font-bold uppercase tracking-widest mb-8 border-b border-brand-border pb-4 flex items-center gap-3">
+                            <Icon name="history" className="text-white" /> Verlauf: {app.company}
+                        </h2>
+                        <div className="space-y-6 max-h-[50vh] overflow-y-auto custom-scrollbar pr-4">
+                            {app.history && app.history.length > 0 ? (
+                                app.history.slice().reverse().map((h, i) => (
+                                    <div key={i} className="relative pl-6 border-l border-brand-border">
+                                        <div className="absolute -left-[5px] top-1 w-2.5 h-2.5 rounded-full bg-brand-muted"></div>
+                                        <div className="text-[10px] font-bold uppercase text-brand-muted mb-1">{h.timestamp}</div>
+                                        <div className="text-sm text-brand-accent/80">{h.event}</div>
+                                    </div>
+                                ))
+                            ) : (
+                                <div className="text-brand-muted italic">Kein Verlauf vorhanden.</div>
+                            )}
+                        </div>
+                        <div className="flex justify-end mt-10">
+                            <button onClick={onClose} className="btn-premium px-10 py-3 rounded text-[10px] font-bold uppercase tracking-widest">Schließen</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function Modal({ onClose, onSave, initialData, API_BASE }) {
+            const [form, setForm] = useState(initialData || {
+                company: '', jobTitle: '', dateApplied: new Date().toISOString().split('T')[0],
+                platform: '', salary: '', hourlyWage: 0, isTempWork: false,
+                shifts: { morning: false, late: false, night: false },
+                status: 'offen', statusDetail: 'vorstellungsgespräch', statusDate: '', statusText: '',
+                pdfPath: ''
+            });
+
+            const [isExtracting, setIsExtracting] = useState(false);
+
+            useEffect(() => {
+                if (form.hourlyWage > 0) {
+                    const factor = form.isTempWork ? 7 : 7.5;
+                    const monthly = (form.hourlyWage * factor * 5 * 4).toFixed(2);
+                    setForm(p => ({ ...p, salary: monthly + " € Brutto" }));
+                }
+            }, [form.hourlyWage, form.isTempWork]);
+
+            const handleChange = (e) => {
+                const { name, value, type, checked } = e.target;
+                if (name.startsWith('shift_')) {
+                    const s = name.split('_')[1];
+                    setForm(p => ({ ...p, shifts: { ...p.shifts, [s]: checked } }));
+                } else if (type === 'checkbox') {
+                    setForm(p => ({ ...p, [name]: checked }));
+                } else {
+                    setForm(p => ({ ...p, [name]: value }));
+                }
+            };
+
+            const handlePdf = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                setIsExtracting(true);
+                const fd = new FormData();
+                fd.append("file", file);
+                try {
+                    const res = await fetch(`${API_BASE}/extract`, { method: "POST", body: fd });
+                    const data = await res.json();
+                    setForm(p => ({ ...p, company: data.company, jobTitle: data.jobTitle, pdfPath: data.pdfPath }));
+                } catch (err) { alert("Analyse fehlgeschlagen"); }
+                setIsExtracting(false);
+            };
+
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-md">
+                    <div className="glass-card w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-lg p-10 custom-scrollbar">
+                        <h2 className="text-xl font-bold uppercase tracking-widest mb-10 border-b border-brand-border pb-4">
+                            {initialData ? 'Eintrag bearbeiten' : 'Aktivität Erfassen'}
+                        </h2>
+
+                        {!initialData && (
+                            <div className="mb-10 p-8 border-2 border-dashed border-brand-border rounded hover:border-brand-muted transition-colors relative flex flex-col items-center gap-3">
+                                <Icon name={isExtracting ? "loader" : "plus-square"} className={isExtracting ? 'animate-spin text-white' : 'text-brand-muted'} size={32} />
+                                <span className="text-[10px] font-bold uppercase tracking-wider text-brand-muted">{isExtracting ? "Analysiere PDF..." : "Bewerbungs-PDF für Auto-Erfassung"}</span>
+                                <input type="file" accept=".pdf" onChange={handlePdf} className="absolute inset-0 opacity-0 cursor-pointer" />
+                            </div>
+                        )}
+
+                        <form onSubmit={(e) => { e.preventDefault(); onSave(form); }} className="space-y-8">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div className="space-y-2">
+                                    <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">Firma</label>
+                                    <input required name="company" value={form.company} onChange={handleChange} className="input-premium w-full p-3 rounded" />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">Stelle</label>
+                                    <input required name="jobTitle" value={form.jobTitle} onChange={handleChange} className="input-premium w-full p-3 rounded" />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">Datum</label>
+                                    <input required type="date" name="dateApplied" value={form.dateApplied} onChange={handleChange} className="input-premium w-full p-3 rounded" />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">Quelle / Link</label>
+                                    <input name="platform" value={form.platform} onChange={handleChange} className="input-premium w-full p-3 rounded" placeholder="z.B. www.indeed.de" />
+                                </div>
+                            </div>
+
+                            <div className="p-6 bg-white/5 rounded border border-brand-border space-y-6">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div className="space-y-2">
+                                        <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">Stundenlohn (€)</label>
+                                        <input type="number" step="0.01" name="hourlyWage" value={form.hourlyWage} onChange={e => setForm(p => ({...p, hourlyWage: parseFloat(e.target.value) || 0}))} className="input-premium w-full p-3 rounded" />
+                                    </div>
+                                    <div className="flex items-center pt-6">
+                                        <label className="flex items-center gap-3 cursor-pointer text-[10px] font-bold uppercase text-brand-muted">
+                                            <input type="checkbox" name="isTempWork" checked={form.isTempWork} onChange={handleChange} className="w-4 h-4 rounded bg-brand-bg border-brand-border" /> Zeitarbeit (-0.5h/Tag)
+                                        </label>
+                                    </div>
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">Berechnetes Gehalt (Monat)</label>
+                                    <input name="salary" value={form.salary} onChange={handleChange} className="input-premium w-full p-3 rounded font-bold text-green-400" />
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-brand-border pt-6">
+                                <label className="flex items-center gap-2 cursor-pointer text-[10px] font-bold uppercase text-brand-muted">
+                                    <input type="checkbox" name="shift_morning" checked={form.shifts.morning} onChange={handleChange} /> Frühschicht
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer text-[10px] font-bold uppercase text-brand-muted">
+                                    <input type="checkbox" name="shift_late" checked={form.shifts.late} onChange={handleChange} /> Spätschicht
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer text-[10px] font-bold uppercase text-brand-muted">
+                                    <input type="checkbox" name="shift_night" checked={form.shifts.night} onChange={handleChange} /> Nachtschicht
+                                </label>
+                            </div>
+
+                            <div className="space-y-6 border-t border-brand-border pt-8">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div className="space-y-2">
+                                        <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">Aktueller Status</label>
+                                        <select name="status" value={form.status} onChange={handleChange} className="input-premium w-full p-3 rounded cursor-pointer">
+                                            <option value="offen">Warten auf Antwort</option>
+                                            <option value="gemeldet">Rückmeldung / Termin</option>
+                                            <option value="absage">Absage</option>
+                                        </select>
+                                    </div>
+                                    {form.status !== 'offen' && (
+                                        <div className="space-y-2">
+                                            <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">Termin / Datum</label>
+                                            <input type="date" name="statusDate" value={form.statusDate} onChange={handleChange} className="input-premium w-full p-3 rounded" />
+                                        </div>
+                                    )}
+                                </div>
+                                {form.status !== 'offen' && (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div className="space-y-2">
+                                            <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">Art (z.B. Telefonat)</label>
+                                            <input name="statusDetail" value={form.statusDetail} onChange={handleChange} className="input-premium w-full p-3 rounded" />
+                                        </div>
+                                        <div className="space-y-2">
+                                            <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">Bemerkung</label>
+                                            <input name="statusText" value={form.statusText} onChange={handleChange} className="input-premium w-full p-3 rounded" />
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex justify-end gap-4 pt-4">
+                                <button type="button" onClick={onClose} className="px-8 py-3 rounded text-[10px] font-bold uppercase hover:bg-white/5 transition-colors">Abbrechen</button>
+                                <button type="submit" className="btn-premium px-10 py-3 rounded text-[10px] font-bold uppercase tracking-widest">Speichern</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
