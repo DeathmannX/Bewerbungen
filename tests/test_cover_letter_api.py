@@ -177,6 +177,82 @@ def test_call_gemini_text_maps_upstream_503_to_503(monkeypatch):
     assert exc_info.value.status_code == 503
 
 
+def test_list_projects_returns_human_readable_label(client, monkeypatch):
+    create_res = client.post("/api/cover-letter/projects", json={})
+    assert create_res.status_code == 200
+    project_id = create_res.json()["project"]["id"]
+
+    monkeypatch.setattr(
+        api,
+        "analyze_job_text",
+        lambda _text, source_url="", page_title="": {
+            "sourceUrl": source_url,
+            "pageTitle": page_title,
+            "companyName": "Airbus Helicopters Technik GmbH",
+            "jobTitle": "Industriemechaniker – dynamische Komponenten",
+            "requirements": ["Wartung", "Montage"],
+            "companySummary": "Luftfahrttechnik",
+            "customers": "Aviation",
+            "isTempWork": False,
+            "contactPerson": "Frau Müller",
+        },
+    )
+
+    save_source = client.post(
+        f"/api/cover-letter/projects/{project_id}/job-source",
+        json={"sourceType": "text", "sourceValue": "dummy"},
+    )
+    assert save_source.status_code == 200
+
+    list_res = client.get("/api/cover-letter/projects")
+    assert list_res.status_code == 200
+    rows = list_res.json()["projects"]
+    row = next((r for r in rows if r["id"] == project_id), None)
+
+    assert row is not None
+    assert row["companyName"] == "Airbus Helicopters Technik GmbH"
+    assert row["jobTitle"] == "Industriemechaniker – dynamische Komponenten"
+    assert row["projectLabel"] == "Airbus Helicopters Technik GmbH – Industriemechaniker – dynamische Komponenten"
+
+
+def test_apply_profile_to_project_accepts_profile_context_dict_rows(client):
+    create_res = client.post("/api/cover-letter/projects", json={})
+    assert create_res.status_code == 200
+    project_id = create_res.json()["project"]["id"]
+
+    profile_res = client.post(
+        "/api/profiles",
+        json={
+            "profileName": "Industriemechaniker",
+            "resumeText": "2019-2024 Praxis",
+            "baselineLetter": "Basistext",
+            "contextEntries": [
+                {
+                    "company": "Firma A",
+                    "role": "Industriemechaniker",
+                    "tasks": "Wartung",
+                    "experiences": "Hydraulik",
+                    "liked": "Teamarbeit",
+                    "disliked": "Schichtwechsel",
+                    "atmosphere": "kollegial",
+                    "notes": "Sicherheitsbewusst",
+                }
+            ],
+        },
+    )
+    assert profile_res.status_code == 200
+    profile_id = profile_res.json()["id"]
+
+    apply_res = client.post(f"/api/cover-letter/projects/{project_id}/apply-profile/{profile_id}")
+    assert apply_res.status_code == 200
+    payload = apply_res.json()
+
+    assert payload["sources"]["resumeText"] == "2019-2024 Praxis"
+    assert payload["sources"]["baselineLetter"] == "Basistext"
+    assert len(payload["resumeContextEntries"]) == 1
+    assert payload["resumeContextEntries"][0]["company"] == "Firma A"
+
+
 def test_cover_letter_iterate_with_feedback_uses_multiple_rounds(client, monkeypatch):
     create_res = client.post("/api/cover-letter/projects", json={"targetScore": 9, "maxRounds": 5})
     project_id = create_res.json()["project"]["id"]

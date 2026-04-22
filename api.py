@@ -1298,6 +1298,39 @@ def list_cover_letter_projects():
         """
     )
     rows = [sqlite_row_to_dict(r) for r in cur.fetchall()]
+
+    cur.execute(
+        """
+        SELECT projectId, jobSourceType, jobSourceValue, jobAnalysisJson
+        FROM cover_letter_sources
+        """
+    )
+    source_rows = [sqlite_row_to_dict(r) for r in cur.fetchall()]
+    sources_by_project = {r.get("projectId"): r for r in source_rows}
+
+    for row in rows:
+        source = sources_by_project.get(row.get("id"), {})
+        analysis = safe_json_loads(source.get("jobAnalysisJson"), {})
+
+        company_name = str(analysis.get("companyName") or "").strip()
+        job_title = str(analysis.get("jobTitle") or "").strip()
+        source_value = str(source.get("jobSourceValue") or "").strip()
+
+        if company_name and job_title:
+            project_label = f"{company_name} – {job_title}"
+        elif job_title:
+            project_label = job_title
+        elif company_name:
+            project_label = company_name
+        elif source_value:
+            project_label = source_value[:120]
+        else:
+            project_label = f"Projekt {str(row.get('id') or '')[:8]}"
+
+        row["projectLabel"] = project_label
+        row["companyName"] = company_name
+        row["jobTitle"] = job_title
+
     conn.close()
     return {"projects": rows}
 
@@ -1828,14 +1861,14 @@ def apply_profile_to_project(project_id: str, profile_id: str):
                 str(uuid.uuid4()),
                 project_id,
                 idx,
-                entry.company or "",
-                entry.role or "",
-                entry.tasks or "",
-                entry.experiences or "",
-                entry.liked or "",
-                entry.disliked or "",
-                entry.atmosphere or "",
-                entry.notes or "",
+                entry.get("company") or "",
+                entry.get("role") or "",
+                entry.get("tasks") or "",
+                entry.get("experiences") or "",
+                entry.get("liked") or "",
+                entry.get("disliked") or "",
+                entry.get("atmosphere") or "",
+                entry.get("notes") or "",
             )
         )
     

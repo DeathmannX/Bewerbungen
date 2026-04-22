@@ -865,18 +865,40 @@
             };
 
             const applyProfile = async (profileId) => {
-                if (!projectId) {
-                    setMessage("Bitte zuerst ein Projekt erstellen oder laden.");
-                    return;
-                }
                 await withBusy(async () => {
+                    if (!projectId) {
+                        const profileRes = await fetch(`${API_BASE}/profiles/${profileId}`);
+                        const profileData = await profileRes.json();
+                        if (!profileRes.ok) throw new Error(profileData.detail || "Profil konnte nicht geladen werden.");
+
+                        setResumeText(profileData.resumeText || "");
+                        setBaselineText(profileData.baselineLetter || "");
+                        if (Array.isArray(profileData.contextEntries) && profileData.contextEntries.length > 0) {
+                            setContextEntries(profileData.contextEntries.map(entry => ({
+                                company: entry.company || "",
+                                role: entry.role || "",
+                                tasks: entry.tasks || "",
+                                experiences: entry.experiences || "",
+                                liked: entry.liked || "",
+                                disliked: entry.disliked || "",
+                                atmosphere: entry.atmosphere || "",
+                                notes: entry.notes || "",
+                            })));
+                        } else {
+                            setContextEntries([{ ...emptyContext }]);
+                        }
+
+                        setMessage("Profil geladen. Bitte jetzt ein Projekt auswählen oder erstellen.");
+                        return;
+                    }
+
                     const res = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/apply-profile/${profileId}`, {
                         method: "POST"
                     });
                     const data = await res.json();
                     if (!res.ok) throw new Error(data.detail || "Profil konnte nicht geladen werden.");
                     syncFromPayload(data);
-                    
+
                     // Sync local form states
                     setResumeText(data.sources?.resumeText || "");
                     setBaselineText(data.sources?.baselineLetter || "");
@@ -1305,11 +1327,11 @@
                                     onClick={() => openProject(p.id)}
                                     className={`px-3 py-1.5 rounded text-xs border ${projectId === p.id ? 'border-white text-white' : 'border-brand-border text-brand-muted hover:text-white'}`}
                                 >
-                                    {p.id.slice(0, 8)} • Score {Number(p.latestScore || 0).toFixed(1)}
+                                    {(p.projectLabel || `Projekt ${p.id.slice(0, 8)}`)} • Score {Number(p.latestScore || 0).toFixed(1)}
                                 </button>
                             ))}
                         </div>
-                        {projectId && <div className="text-xs text-brand-muted">Aktives Projekt: {projectId}</div>}
+                        {projectId && <div className="text-xs text-brand-muted">Aktives Projekt: {(projects.find(p => p.id === projectId)?.projectLabel) || projectId}</div>}
                         {message && <div className="text-xs text-blue-300">{message}</div>}
                     </section>
 
