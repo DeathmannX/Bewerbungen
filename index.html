@@ -828,12 +828,10 @@
             const [busy, setBusy] = useState(false);
             const [message, setMessage] = useState("");
             const [voiceText, setVoiceText] = useState("");
-            const [stationBlueprint, setStationBlueprint] = useState([]);
 
             useEffect(() => {
                 loadProjects();
                 loadProfiles();
-                loadStationBlueprint();
             }, []);
 
             const loadProfiles = async () => {
@@ -842,20 +840,6 @@
                     const data = await res.json();
                     setProfiles(data.profiles || []);
                 } catch (_err) { setProfiles([]); }
-            };
-
-            const loadStationBlueprint = async () => {
-                try {
-                    const res = await fetch(`${API_BASE}/cover-letter/station-blueprint`);
-                    const data = await res.json();
-                    if (res.ok && Array.isArray(data.entries)) {
-                        setStationBlueprint(data.entries);
-                    } else {
-                        setStationBlueprint([]);
-                    }
-                } catch (_err) {
-                    setStationBlueprint([]);
-                }
             };
 
             const saveCurrentAsProfile = async () => {
@@ -1155,15 +1139,6 @@
                     atmosphere: entry.atmosphere || "",
                     notes: entry.notes || "",
                 }));
-            };
-
-            const loadBlueprintIntoContext = () => {
-                if (!stationBlueprint.length) {
-                    setMessage("Keine Stationsvorlage verfügbar.");
-                    return;
-                }
-                setContextEntries(mapExtractedEntries(stationBlueprint));
-                setMessage(`Stationsvorlage geladen (${stationBlueprint.length} Einträge). Bitte prüfen und speichern.`);
             };
 
             const extractContextFromText = async () => {
@@ -1481,14 +1456,7 @@
                     <section className="glass-card p-6 rounded-lg space-y-4">
                         <h3 className="text-xs font-bold uppercase tracking-widest text-brand-muted">4) Kontext pro Station</h3>
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <button
-                                disabled={busy || !projectId}
-                                onClick={loadBlueprintIntoContext}
-                                className="glass-card px-4 py-2 rounded text-xs uppercase tracking-wide"
-                            >
-                                Stationsvorlage laden
-                            </button>
+                        <div className="grid grid-cols-1 md:grid-cols-1 gap-3">
                             <button
                                 disabled={busy || !projectId}
                                 onClick={extractContextFromText}
@@ -1512,7 +1480,11 @@
                             <input
                                 type="file"
                                 accept=".txt,.pdf"
-                                onChange={e => extractContextFromFile(e.target.files[0])}
+                                onChange={e => {
+                                    const picked = e.target.files?.[0];
+                                    extractContextFromFile(picked || null);
+                                    e.target.value = "";
+                                }}
                                 className="absolute inset-0 opacity-0 cursor-pointer"
                             />
                         </div>
