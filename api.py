@@ -947,22 +947,20 @@ def call_gemini_text(prompt: str, temperature: float = 0.25) -> str:
     if not api_key:
         raise HTTPException(status_code=503, detail="GEMINI_API_KEY ist nicht gesetzt")
 
-    # Liste der zu testenden Modelle (Bestes -> Fallback)
     preferred_model = os.getenv("GEMINI_MODEL", "").strip()
     models_to_try = []
     if preferred_model:
         models_to_try.append(preferred_model)
-    
-    # Standard-Kaskade (Priorisierung von 1.5-flash für maximale Kompatibilität im Free-Tier)
-    for m in ["gemini-1.5-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro", "gemini-1.0-pro"]:
+
+    for m in ["gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro"]:
         if m not in models_to_try:
             models_to_try.append(m)
 
     last_error = "Keine Modelle zum Testen vorhanden"
     saw_temporary_upstream_issue = False
+    temporary_error_detail = ""
 
     for model_name in models_to_try:
-        # Wir probieren erst v1beta, dann v1 (Fallback-URLs)
         for api_version in ["v1beta", "v1"]:
             url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:generateContent?key={api_key}"
             body = {
@@ -979,7 +977,6 @@ def call_gemini_text(prompt: str, temperature: float = 0.25) -> str:
                 with urlopen(req, timeout=90) as resp:
                     payload = json.loads(resp.read().decode("utf-8"))
 
-                    # Extrahiere Text (robust)
                     candidates = payload.get("candidates") or []
                     if candidates:
                         content = candidates[0].get("content") or {}
@@ -995,17 +992,19 @@ def call_gemini_text(prompt: str, temperature: float = 0.25) -> str:
                 print(f"DEBUG: {last_error}")
                 if exc.code in (429, 503):
                     saw_temporary_upstream_issue = True
+                    if not temporary_error_detail:
+                        temporary_error_detail = last_error
                 continue
             except Exception as exc:
                 last_error = f"Verbindungsfehler {model_name} ({api_version}): {exc}"
                 print(f"DEBUG: {last_error}")
                 continue
 
-    # Wenn wir hier landen, haben alle Versuche versagt
     if saw_temporary_upstream_issue:
+        detail = temporary_error_detail or last_error
         raise HTTPException(
             status_code=503,
-            detail=f"KI-Dienst temporär nicht verfügbar (Quota/Überlastung). Letzter Fehler: {last_error}",
+            detail=f"KI-Dienst temporär nicht verfügbar (Quota/Überlastung). Relevanter Fehler: {detail}",
         )
 
     raise HTTPException(status_code=502, detail=f"KI-Dienst nicht erreichbar. Letzter Fehler: {last_error}")
@@ -1075,6 +1074,82 @@ def build_resume_context_text(entries: List[Dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
+def _contact_salutation(contact_person: str) -> str:
+    c = (contact_person or "").strip()
+    low = c.lower()
+    if not c or "keiner gefunden" in low:
+        return "Sehr geehrte Damen und Herren,"
+    if "frau" in low:
+        return f"Sehr geehrte {c},"
+    if "herr" in low:
+        return f"Sehr geehrter {c},"
+    return "Sehr geehrte Damen und Herren,"
+
+
+def generate_cover_letter_round_fallback(
+    job_analysis: Dict[str, Any],
+    baseline_letter: str,
+    resume_summary: Dict[str, Any],
+    resume_context_entries: List[Dict[str, Any]],
+    feedback: str,
+    error_detail: str,
+) -> Dict[str, Any]:
+    company = (job_analysis.get("companyName") or "Ihr Unternehmen").strip()
+    title = (job_analysis.get("jobTitle") or "die ausgeschriebene Position").strip()
+    requirements = job_analysis.get("requirements") or []
+    if not isinstance(requirements, list):
+        requirements = []
+    req_text = ", ".join([str(r).strip() for r in requirements if str(r).strip()][:3])
+
+    skills = resume_summary.get("skills") or []
+    if not isinstance(skills, list):
+        skills = []
+    skill_text = ", ".join([str(s).strip() for s in skills if str(s).strip()][:5])
+
+    context_hint = ""
+    if resume_context_entries:
+        first = resume_context_entries[0]
+        context_hint = f"Besonders relevant ist meine Erfahrung bei {first.get('company') or 'meinen letzten Stationen'} in der Rolle {first.get('role') or 'im technischen Umfeld'}."
+
+    salutation = _contact_salutation(job_analysis.get("contactPerson") or "")
+
+    draft = f"""
+{salutation}
+
+hiermit bewerbe ich mich als {title} bei {company}. {context_hint}
+Ich bringe eine praxisnahe Arbeitsweise aus mehreren Industrie- und Instandhaltungsstationen mit.
+{('Wichtige Anforderungen aus der Stelle, die ich erfülle: ' + req_text + '.') if req_text else ''}
+{('Fachschwerpunkte aus meinem Profil: ' + skill_text + '.') if skill_text else ''}
+
+{(baseline_letter or '').strip()[:1400]}
+
+Gern überzeuge ich Sie in einem persönlichen Gespräch.
+
+Mit freundlichen Grüßen
+""".strip()
+
+    improvements = [
+        "Sobald der KI-Dienst wieder verfügbar ist, Text sprachlich verfeinern",
+        "1-2 konkrete Projekterfolge quantifizieren",
+    ]
+    if feedback:
+        improvements.append("Nutzer-Feedback bei nächster KI-Runde gezielt einarbeiten")
+
+    return {
+        "draft": draft,
+        "scoreTotal": 7.2,
+        "scoreBreakdown": {
+            "applicant_voice": 7.5,
+            "recruiter_fit": 7.0,
+            "technical_fit": 7.2,
+            "risk_consistency": 7.1,
+        },
+        "rationale": f"Fallback aktiv: KI-Dienst aktuell nicht verfügbar ({error_detail[:180]}).",
+        "improvements": improvements,
+        "usedFallback": True,
+    }
+
+
 def generate_cover_letter_round(
     job_analysis: Dict[str, Any],
     baseline_letter: str,
@@ -1142,7 +1217,20 @@ Nutzer-Feedback für diese Runde:
 {feedback or 'kein zusätzliches Feedback'}
 """.strip()
 
-    parsed = call_gemini_json(prompt, temperature=0.35)
+    try:
+        parsed = call_gemini_json(prompt, temperature=0.35)
+    except HTTPException as exc:
+        if exc.status_code in (502, 503):
+            return generate_cover_letter_round_fallback(
+                job_analysis=job_analysis,
+                baseline_letter=baseline_letter,
+                resume_summary=resume_summary,
+                resume_context_entries=resume_context_entries,
+                feedback=feedback,
+                error_detail=str(exc.detail),
+            )
+        raise
+
     draft = str(parsed.get("draft") or "").strip()
     if not draft:
         raise HTTPException(status_code=502, detail="KI lieferte keinen Anschreiben-Entwurf")
@@ -1169,6 +1257,7 @@ Nutzer-Feedback für diese Runde:
         "scoreBreakdown": score_breakdown,
         "rationale": rationale,
         "improvements": improvements,
+        "usedFallback": False,
     }
 
 
@@ -1255,6 +1344,9 @@ def run_cover_letter_auto_loop(
         )
 
         current_draft = result["draft"]
+        if result.get("usedFallback"):
+            # Ohne KI-Dienst keine sinnvolle Mehrfach-Iteration
+            break
         if result["scoreTotal"] >= target_score:
             break
 
@@ -1532,7 +1624,7 @@ def list_cover_letter_projects():
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, createdAt, updatedAt, status, targetScore, maxRounds, latestScore
+        SELECT id, createdAt, updatedAt, status, targetScore, maxRounds, latestScore, latestDraft
         FROM cover_letter_projects
         ORDER BY updatedAt DESC
         """
@@ -1548,6 +1640,8 @@ def list_cover_letter_projects():
     source_rows = [sqlite_row_to_dict(r) for r in cur.fetchall()]
     sources_by_project = {r.get("projectId"): r for r in source_rows}
 
+    visible_rows: List[Dict[str, Any]] = []
+
     for row in rows:
         source = sources_by_project.get(row.get("id"), {})
         analysis = safe_json_loads(source.get("jobAnalysisJson"), {})
@@ -1555,6 +1649,12 @@ def list_cover_letter_projects():
         company_name = str(analysis.get("companyName") or "").strip()
         job_title = str(analysis.get("jobTitle") or "").strip()
         source_value = str(source.get("jobSourceValue") or "").strip()
+        latest_draft = str(row.get("latestDraft") or "").strip()
+        latest_score = float(row.get("latestScore") or 0.0)
+
+        is_placeholder = not company_name and not job_title and not source_value and not latest_draft and latest_score <= 0.0
+        if is_placeholder:
+            continue
 
         if company_name and job_title:
             project_label = f"{company_name} – {job_title}"
@@ -1570,9 +1670,11 @@ def list_cover_letter_projects():
         row["projectLabel"] = project_label
         row["companyName"] = company_name
         row["jobTitle"] = job_title
+        row.pop("latestDraft", None)
+        visible_rows.append(row)
 
     conn.close()
-    return {"projects": rows}
+    return {"projects": visible_rows}
 
 
 @app.get("/api/cover-letter/projects/{project_id}")

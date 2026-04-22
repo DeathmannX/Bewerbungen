@@ -148,8 +148,10 @@ def test_cover_letter_generate_requires_gemini_without_mock(client, monkeypatch)
     )
 
     gen_res = client.post(f"/api/cover-letter/projects/{project_id}/generate", json={})
-    assert gen_res.status_code == 503
-    assert "GEMINI_API_KEY" in gen_res.json()["detail"]
+    assert gen_res.status_code == 200
+    payload = gen_res.json()
+    assert payload["result"]["rounds"]
+    assert "Fallback" in (payload["result"]["rounds"][0]["rationale"] or "")
 
 
 def test_call_gemini_text_maps_upstream_503_to_503(monkeypatch):
@@ -376,3 +378,68 @@ def test_resume_context_extract_filters_empty_entries(client, monkeypatch):
 
     assert len(entries) >= 1
     assert all((e.get("company") or "").strip() or (e.get("role") or "").strip() for e in entries)
+
+
+def test_generate_uses_offline_fallback_on_upstream_503(client, monkeypatch):
+    create_res = client.post("/api/cover-letter/projects", json={})
+    project_id = create_res.json()["project"]["id"]
+
+    client.post(
+        f"/api/cover-letter/projects/{project_id}/job-source",
+        json={"sourceType": "text", "sourceValue": "KNDS GmbH sucht Industriemechaniker"},
+    )
+    client.post(
+        f"/api/cover-letter/projects/{project_id}/baseline-letter",
+        data={"text": "Hiermit bewerbe ich mich als Industriemechaniker."},
+    )
+    client.post(
+        f"/api/cover-letter/projects/{project_id}/resume",
+        data={"text": "2019-2024 Industriemechaniker mit CNC-Erfahrung."},
+    )
+
+    def _raise_503(_prompt, temperature=0.25):
+        _ = temperature
+        raise api.HTTPException(status_code=503, detail="Quota überschritten")
+
+    monkeypatch.setattr(api, "call_gemini_json", _raise_503)
+
+    res = client.post(f"/api/cover-letter/projects/{project_id}/generate", json={})
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["result"]["rounds"]
+    assert "Fallback" in (payload["result"]["rounds"][0]["rationale"] or "")
+
+
+def test_list_projects_hides_empty_placeholders(client, monkeypatch):
+    empty_res = client.post("/api/cover-letter/projects", json={})
+    empty_id = empty_res.json()["project"]["id"]
+
+    filled_res = client.post("/api/cover-letter/projects", json={})
+    filled_id = filled_res.json()["project"]["id"]
+
+    monkeypatch.setattr(
+        api,
+        "analyze_job_text",
+        lambda _text, source_url="", page_title="": {
+            "sourceUrl": source_url,
+            "pageTitle": page_title,
+            "companyName": "Muster GmbH",
+            "jobTitle": "Industriemechaniker",
+            "requirements": [],
+            "companySummary": "",
+            "customers": "",
+            "isTempWork": False,
+            "contactPerson": "",
+        },
+    )
+
+    client.post(
+        f"/api/cover-letter/projects/{filled_id}/job-source",
+        json={"sourceType": "text", "sourceValue": "dummy"},
+    )
+
+    list_res = client.get("/api/cover-letter/projects")
+    assert list_res.status_code == 200
+    ids = [p["id"] for p in list_res.json()["projects"]]
+    assert filled_id in ids
+    assert empty_id not in ids
