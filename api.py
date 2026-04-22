@@ -94,9 +94,20 @@ MAX_UPLOAD_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_SIZE_BYTES", str(5 * 1024 * 10
 ALLOWED_PDF_CONTENT_TYPES = {"application/pdf", "application/x-pdf"}
 ALLOWED_TEXT_CONTENT_TYPES = {"text/plain", "application/octet-stream", ""}
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 COVER_LETTER_TARGET_SCORE = float(os.getenv("COVER_LETTER_TARGET_SCORE", "9"))
 COVER_LETTER_MAX_ROUNDS = int(os.getenv("COVER_LETTER_MAX_ROUNDS", "6"))
+
+MODEL_LIST_CACHE_SECONDS = int(os.getenv("GEMINI_MODEL_LIST_CACHE_SECONDS", "900"))
+DEFAULT_MODEL_CASCADE = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-2.5-pro",
+]
+MODEL_COOLDOWN_UNTIL: Dict[str, float] = {}
+MODEL_LIST_CACHE: Dict[str, Any] = {"expires_at": 0.0, "models": []}
 
 # Ordner für PDFs bereitstellen
 app.mount("/pdfs", StaticFiles(directory=UPLOAD_DIR), name="pdfs")
@@ -942,19 +953,133 @@ def extract_json_from_text(raw_text: str) -> Dict[str, Any]:
     raise ValueError("Kein JSON-Objekt in KI-Antwort gefunden")
 
 
+def _model_variants(name: str) -> List[str]:
+    clean = (name or "").replace("models/", "").strip()
+    if not clean:
+        return []
+    variants = [clean]
+    if clean.endswith("-001"):
+        variants.append(clean[:-4])
+    else:
+        variants.append(f"{clean}-001")
+    return variants
+
+
+def _resolve_available_model_name(model: str, available_set: set) -> str:
+    for candidate in _model_variants(model):
+        if candidate in available_set:
+            return candidate
+    return ""
+
+
+def _parse_retry_delay_seconds(error_body: str) -> int:
+    try:
+        payload = json.loads(error_body or "{}")
+        details = ((payload.get("error") or {}).get("details") or [])
+        for item in details:
+            if str(item.get("@type") or "").endswith("RetryInfo"):
+                raw = str(item.get("retryDelay") or "").strip()
+                m = re.match(r"^(\d+)", raw)
+                if m:
+                    return int(m.group(1))
+    except Exception:
+        return 0
+    return 0
+
+
+def _has_daily_quota_violation(error_body: str) -> bool:
+    try:
+        payload = json.loads(error_body or "{}")
+        details = ((payload.get("error") or {}).get("details") or [])
+        for item in details:
+            if str(item.get("@type") or "").endswith("QuotaFailure"):
+                for v in item.get("violations") or []:
+                    quota_id = str(v.get("quotaId") or "")
+                    if "PerDay" in quota_id:
+                        return True
+    except Exception:
+        return False
+    return False
+
+
+def list_generate_models(api_key: str, force_refresh: bool = False) -> List[str]:
+    now_ts = time.time()
+    if not force_refresh and MODEL_LIST_CACHE.get("expires_at", 0) > now_ts:
+        cached = MODEL_LIST_CACHE.get("models") or []
+        if cached:
+            return list(cached)
+
+    url = f"https://generativelanguage.googleapis.com/v1/models?key={api_key}"
+    req = Request(url, headers={"Content-Type": "application/json"}, method="GET")
+
+    with urlopen(req, timeout=30) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+
+    models: List[str] = []
+    for m in payload.get("models") or []:
+        methods = m.get("supportedGenerationMethods") or []
+        if "generateContent" not in methods:
+            continue
+        name = str(m.get("name") or "").replace("models/", "").strip()
+        if name:
+            models.append(name)
+
+    MODEL_LIST_CACHE["models"] = models
+    MODEL_LIST_CACHE["expires_at"] = now_ts + MODEL_LIST_CACHE_SECONDS
+    return list(models)
+
+
+def select_model_candidates(api_key: str) -> List[str]:
+    preferred_model = os.getenv("GEMINI_MODEL", "").strip() or GEMINI_MODEL
+    cascade_raw = os.getenv("GEMINI_MODEL_CASCADE", "").strip()
+    configured_cascade = [m.strip() for m in cascade_raw.split(",") if m.strip()] if cascade_raw else []
+    base_priority = configured_cascade or DEFAULT_MODEL_CASCADE
+
+    try:
+        available = list_generate_models(api_key)
+    except Exception:
+        available = []
+
+    available_set = set(available)
+
+    ordered: List[str] = []
+
+    def add_model(name: str):
+        resolved = _resolve_available_model_name(name, available_set) if available_set else (name or "")
+        if not resolved:
+            return
+        if resolved in ordered:
+            return
+        cooldown_until = MODEL_COOLDOWN_UNTIL.get(resolved, 0.0)
+        if cooldown_until > time.time():
+            return
+        ordered.append(resolved)
+
+    add_model(preferred_model)
+    for model_name in base_priority:
+        add_model(model_name)
+
+    for model_name in available:
+        add_model(model_name)
+
+    if ordered:
+        return ordered
+
+    # Fallback if everything is temporarily cooled down or list unavailable
+    for model_name in ([preferred_model] + base_priority):
+        clean = model_name.replace("models/", "").strip()
+        if clean and clean not in ordered:
+            ordered.append(clean)
+
+    return ordered
+
+
 def call_gemini_text(prompt: str, temperature: float = 0.25) -> str:
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise HTTPException(status_code=503, detail="GEMINI_API_KEY ist nicht gesetzt")
 
-    preferred_model = os.getenv("GEMINI_MODEL", "").strip()
-    models_to_try = []
-    if preferred_model:
-        models_to_try.append(preferred_model)
-
-    for m in ["gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro"]:
-        if m not in models_to_try:
-            models_to_try.append(m)
+    models_to_try = select_model_candidates(api_key)
 
     last_error = "Keine Modelle zum Testen vorhanden"
     saw_temporary_upstream_issue = False
@@ -990,10 +1115,17 @@ def call_gemini_text(prompt: str, temperature: float = 0.25) -> str:
                 err_body = exc.read().decode("utf-8", errors="ignore")
                 last_error = f"Modell {model_name} ({api_version}) Fehler {exc.code}: {err_body}"
                 print(f"DEBUG: {last_error}")
+
                 if exc.code in (429, 503):
+                    retry_after = max(15, _parse_retry_delay_seconds(err_body))
+                    if _has_daily_quota_violation(err_body):
+                        retry_after = max(retry_after, 6 * 60 * 60)
+                    MODEL_COOLDOWN_UNTIL[model_name] = time.time() + retry_after
                     saw_temporary_upstream_issue = True
                     if not temporary_error_detail:
                         temporary_error_detail = last_error
+                elif exc.code == 404:
+                    MODEL_COOLDOWN_UNTIL[model_name] = time.time() + (12 * 60 * 60)
                 continue
             except Exception as exc:
                 last_error = f"Verbindungsfehler {model_name} ({api_version}): {exc}"

@@ -1,3 +1,5 @@
+import time
+
 import api
 from fastapi.testclient import TestClient
 import pytest
@@ -443,3 +445,37 @@ def test_list_projects_hides_empty_placeholders(client, monkeypatch):
     ids = [p["id"] for p in list_res.json()["projects"]]
     assert filled_id in ids
     assert empty_id not in ids
+
+
+def test_select_model_candidates_prefers_available_free_tier_order(monkeypatch):
+    monkeypatch.setattr(api, "list_generate_models", lambda _api_key: [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash-lite-001",
+        "gemini-2.0-flash",
+        "gemini-2.5-flash-lite",
+    ])
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+    api.MODEL_COOLDOWN_UNTIL.clear()
+
+    selected = api.select_model_candidates("dummy")
+    assert selected[:4] == [
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash-lite-001",
+        "gemini-2.0-flash",
+    ]
+
+
+def test_select_model_candidates_skips_models_on_cooldown(monkeypatch):
+    monkeypatch.setattr(api, "list_generate_models", lambda _api_key: [
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash-lite-001",
+        "gemini-2.0-flash",
+    ])
+    api.MODEL_COOLDOWN_UNTIL.clear()
+    api.MODEL_COOLDOWN_UNTIL["gemini-2.5-flash-lite"] = time.time() + 300
+
+    selected = api.select_model_candidates("dummy")
+    assert "gemini-2.5-flash-lite" not in selected
+    assert selected[0] == "gemini-2.0-flash-lite-001"
