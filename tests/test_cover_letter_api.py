@@ -314,3 +314,65 @@ def test_cover_letter_iterate_with_feedback_uses_multiple_rounds(client, monkeyp
     assert result["targetReached"] is True
     assert len(result["rounds"]) == 2
     assert result["finalDraft"] == "Runde 2 Entwurf"
+
+
+def test_station_blueprint_contains_key_missing_stations(client):
+    res = client.get("/api/cover-letter/station-blueprint")
+    assert res.status_code == 200
+    entries = res.json()["entries"]
+    assert len(entries) >= 10
+
+    companies = [e["company"] for e in entries]
+    assert any("Rehadapt" in c for c in companies)
+    assert any("Adecco" in c for c in companies)
+
+
+def test_resume_context_extract_text_uses_voice_as_fill_help(client, monkeypatch):
+    create_res = client.post("/api/cover-letter/projects", json={})
+    project_id = create_res.json()["project"]["id"]
+
+    monkeypatch.setattr(api, "call_gemini_json", lambda _prompt, temperature=0.25: {"entries": []})
+
+    res = client.post(
+        f"/api/cover-letter/projects/{project_id}/resume-context-extract-text",
+        json={
+            "resumeText": "01.03.2025 – 31.08.2025 Rehadapt GmbH in Kassel\nEinrichten von CNC Maschinen",
+            "voiceText": "Adecco (KVG Kassel): einstellen der Schienenbremsen und Gewichtsgeber",
+        },
+    )
+    assert res.status_code == 200
+    entries = res.json()["entries"]
+
+    companies = " | ".join(e.get("company", "") for e in entries)
+    roles = " | ".join(e.get("role", "") for e in entries)
+    tasks = " | ".join(e.get("tasks", "") for e in entries)
+
+    assert "Rehadapt" in companies
+    assert "Adecco" in companies
+    assert "CNC" in tasks or "CNC" in roles
+
+
+def test_resume_context_extract_filters_empty_entries(client, monkeypatch):
+    create_res = client.post("/api/cover-letter/projects", json={})
+    project_id = create_res.json()["project"]["id"]
+
+    monkeypatch.setattr(
+        api,
+        "call_gemini_json",
+        lambda _prompt, temperature=0.25: {
+            "entries": [
+                {"company": "", "role": "", "tasks": "", "experiences": "", "liked": "", "disliked": "", "atmosphere": "", "notes": ""},
+                {"company": "Team Time GmbH", "role": "Produktionsmitarbeiter", "tasks": "Liner vermessen", "experiences": "", "liked": "", "disliked": "", "atmosphere": "", "notes": ""},
+            ]
+        },
+    )
+
+    res = client.post(
+        f"/api/cover-letter/projects/{project_id}/resume-context-extract-text",
+        json={"resumeText": "Team Time GmbH (Kunde Hexagon Purus)\nLinerhälften eingangsvermessen"},
+    )
+    assert res.status_code == 200
+    entries = res.json()["entries"]
+
+    assert len(entries) >= 1
+    assert all((e.get("company") or "").strip() or (e.get("role") or "").strip() for e in entries)

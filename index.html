@@ -827,10 +827,13 @@
             const [showValidationErrors, setShowValidationErrors] = useState(false);
             const [busy, setBusy] = useState(false);
             const [message, setMessage] = useState("");
+            const [voiceText, setVoiceText] = useState("");
+            const [stationBlueprint, setStationBlueprint] = useState([]);
 
             useEffect(() => {
                 loadProjects();
                 loadProfiles();
+                loadStationBlueprint();
             }, []);
 
             const loadProfiles = async () => {
@@ -839,6 +842,20 @@
                     const data = await res.json();
                     setProfiles(data.profiles || []);
                 } catch (_err) { setProfiles([]); }
+            };
+
+            const loadStationBlueprint = async () => {
+                try {
+                    const res = await fetch(`${API_BASE}/cover-letter/station-blueprint`);
+                    const data = await res.json();
+                    if (res.ok && Array.isArray(data.entries)) {
+                        setStationBlueprint(data.entries);
+                    } else {
+                        setStationBlueprint([]);
+                    }
+                } catch (_err) {
+                    setStationBlueprint([]);
+                }
             };
 
             const saveCurrentAsProfile = async () => {
@@ -1126,6 +1143,60 @@
                 });
             };
 
+            const mapExtractedEntries = (entries) => {
+                if (!Array.isArray(entries) || entries.length === 0) return [{ ...emptyContext }];
+                return entries.map(entry => ({
+                    company: entry.company || "",
+                    role: entry.role || "",
+                    tasks: entry.tasks || "",
+                    experiences: entry.experiences || "",
+                    liked: entry.liked || "",
+                    disliked: entry.disliked || "",
+                    atmosphere: entry.atmosphere || "",
+                    notes: entry.notes || "",
+                }));
+            };
+
+            const loadBlueprintIntoContext = () => {
+                if (!stationBlueprint.length) {
+                    setMessage("Keine Stationsvorlage verfügbar.");
+                    return;
+                }
+                setContextEntries(mapExtractedEntries(stationBlueprint));
+                setMessage(`Stationsvorlage geladen (${stationBlueprint.length} Einträge). Bitte prüfen und speichern.`);
+            };
+
+            const extractContextFromText = async () => {
+                if (!projectId) {
+                    setMessage("Bitte zuerst ein Projekt erstellen.");
+                    return;
+                }
+                const hasResume = (resumeText || "").trim().length > 0;
+                const hasVoice = (voiceText || "").trim().length > 0;
+                if (!hasResume && !hasVoice) {
+                    setMessage("Bitte Lebenslauftext oder Sprachnotiz-Text eintragen.");
+                    return;
+                }
+
+                await withBusy(async () => {
+                    const res = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/resume-context-extract-text`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            resumeText: hasResume ? resumeText : voiceText,
+                            voiceText: hasVoice ? voiceText : "",
+                        })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || "Textanalyse fehlgeschlagen.");
+                    const mapped = mapExtractedEntries(data.entries || []);
+                    setContextEntries(mapped);
+
+                    const llmInfo = data?.meta?.llmError ? " (KI-Fallback aktiv)" : "";
+                    setMessage(`${mapped.length} Stationen aus Text extrahiert${llmInfo}. Bitte prüfen und speichern.`);
+                });
+            };
+
             const extractContextFromFile = async (file) => {
                 if (!projectId) {
                     setMessage("Bitte zuerst ein Projekt erstellen.");
@@ -1135,18 +1206,19 @@
                 await withBusy(async () => {
                     const fd = new FormData();
                     fd.append("file", file);
+                    if ((voiceText || "").trim()) {
+                        fd.append("voiceText", voiceText.trim());
+                    }
                     const res = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/resume-context-extract`, {
                         method: "POST",
                         body: fd
                     });
                     const data = await res.json();
                     if (!res.ok) throw new Error(data.detail || "Extraktion fehlgeschlagen.");
-                    if (data.entries && data.entries.length > 0) {
-                        setContextEntries(data.entries);
-                        setMessage(`${data.entries.length} Stationen extrahiert. Bitte prüfen und speichern.`);
-                    } else {
-                        setMessage("Keine Stationen im Text erkannt.");
-                    }
+                    const mapped = mapExtractedEntries(data.entries || []);
+                    setContextEntries(mapped);
+                    const llmInfo = data?.meta?.llmError ? " (KI-Fallback aktiv)" : "";
+                    setMessage(`${mapped.length} Stationen extrahiert${llmInfo}. Bitte prüfen und speichern.`);
                 });
             };
 
@@ -1408,15 +1480,40 @@
 
                     <section className="glass-card p-6 rounded-lg space-y-4">
                         <h3 className="text-xs font-bold uppercase tracking-widest text-brand-muted">4) Kontext pro Station</h3>
-                        
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <button
+                                disabled={busy || !projectId}
+                                onClick={loadBlueprintIntoContext}
+                                className="glass-card px-4 py-2 rounded text-xs uppercase tracking-wide"
+                            >
+                                Stationsvorlage laden
+                            </button>
+                            <button
+                                disabled={busy || !projectId}
+                                onClick={extractContextFromText}
+                                className="glass-card px-4 py-2 rounded text-xs uppercase tracking-wide"
+                            >
+                                Text + Sprachnotiz analysieren
+                            </button>
+                        </div>
+
+                        <textarea
+                            value={voiceText}
+                            onChange={e => setVoiceText(e.target.value)}
+                            rows="4"
+                            className="input-premium w-full p-3 rounded text-sm"
+                            placeholder="Optional: Transkript aus Sprachnachricht hier einfügen (Ausfüllhilfe)."
+                        />
+
                         <div className="p-4 border-2 border-dashed border-brand-border rounded hover:border-brand-muted transition-colors relative flex flex-col items-center gap-2 mb-4">
                             <Icon name="file-text" size={24} className="text-brand-muted" />
-                            <span className="text-[10px] font-bold uppercase tracking-wider text-brand-muted">Erfahrungen aus .txt oder .pdf Datei extrahieren</span>
-                            <input 
-                                type="file" 
-                                accept=".txt,.pdf" 
-                                onChange={e => extractContextFromFile(e.target.files[0])} 
-                                className="absolute inset-0 opacity-0 cursor-pointer" 
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-brand-muted">Erfahrungen aus .txt oder .pdf Datei extrahieren (optional mit Sprachnotiz-Text)</span>
+                            <input
+                                type="file"
+                                accept=".txt,.pdf"
+                                onChange={e => extractContextFromFile(e.target.files[0])}
+                                className="absolute inset-0 opacity-0 cursor-pointer"
                             />
                         </div>
 

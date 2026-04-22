@@ -370,6 +370,19 @@ class CoverLetterResumeContextInput(BaseModel):
     entries: List[CoverLetterResumeContextEntryInput] = Field(default_factory=list)
 
 
+class ResumeContextExtractTextInput(BaseModel):
+    resumeText: str
+    voiceText: Optional[str] = ""
+
+    @field_validator("resumeText")
+    @classmethod
+    def validate_resume_text(cls, value):
+        clean = (value or "").strip()
+        if not clean:
+            raise ValueError("resumeText darf nicht leer sein")
+        return clean
+
+
 class CoverLetterGenerateInput(BaseModel):
     targetScore: Optional[float] = None
     maxRounds: Optional[int] = None
@@ -653,7 +666,8 @@ def parse_resume_summary(resume_text: str) -> Dict[str, Any]:
     skill_keywords = [
         "industriemechanik", "zerspanung", "cnc", "wartung", "instandhaltung",
         "hydraulik", "pneumatik", "montage", "qualität", "produktion",
-        "schweißen", "drehen", "fräsen", "schicht", "team"
+        "schweißen", "drehen", "fräsen", "schicht", "team", "fahrdienstleiter",
+        "weichenwärter", "stellwerk", "dichtheitsprüfung", "messtechnik"
     ]
     lower = resume_text.lower()
     found_skills = [kw for kw in skill_keywords if kw in lower]
@@ -663,6 +677,232 @@ def parse_resume_summary(resume_text: str) -> Dict[str, Any]:
         "stationHints": stations,
         "skills": found_skills[:20],
         "preview": "\n".join(lines[:20]),
+    }
+
+
+def default_station_blueprint() -> List[Dict[str, str]]:
+    return [
+        {"company": "Per-Tempus GmbH (Kunde: Gebr. Bode GmbH & Co. KG, Kassel)", "role": "Produktionshelfer", "tasks": "Montage, Reinigung und Bekleben von Rampen für die KVG", "experiences": "3-Schicht-Erfahrung"},
+        {"company": "AutoVision Zeitarbeit GmbH & Co. OHG (Kunde: Volkswagen AG, Baunatal)", "role": "Produktionshelfer Getriebemontage", "tasks": "Bandmontage DQ400e/DL382, Materialbereitstellung (Kanban)", "experiences": "2-/3-Schicht und strukturierte Taktarbeit"},
+        {"company": "Weiterbildung zum CNC-Programmierer", "role": "Teilnehmer Weiterbildung", "tasks": "CNC Programmierung Drehen/Fräsen (PAL, Sinumerik, Heidenhain, Fanuc, CAD/CAM)", "experiences": "1069 Unterrichtsstunden, Abschluss sehr gut"},
+        {"company": "DIS AG (Einsatz bei DB Fahrzeuginstandhaltungs GmbH, Kassel)", "role": "CNC-Maschinenbediener", "tasks": "Radsatzdrehmaschinen, Reprofilierung und Qualitätsprüfung", "experiences": "interne Richtlinien und Maßsysteme (AR/SR/C-Maß)"},
+        {"company": "DB Fahrzeuginstandhaltungs GmbH, Kassel", "role": "Industriemechaniker / CNC / Demontage / Montage", "tasks": "Radsatzarbeiten, Bremsscheiben, spätere Montage von Schallabsorbern", "experiences": "Übernahme nach Zeitarbeit; Erfahrung mit Abteilungswechseln"},
+        {"company": "DB RegioNetz Verkehrs GmbH, Fritzlar", "role": "Fahrdienstleiter und Weichenwärter", "tasks": "Zugfahrten koordinieren, mechanisches Stellwerk bedienen, Fahrkartenverkauf", "experiences": "Richtlinie 408.01, Schichtbetrieb"},
+        {"company": "PEAG Personal GmbH (Kunde: Daimler Trucks, Kassel)", "role": "Produktionsmitarbeiter / Achsbrückenmontage", "tasks": "Achsbrückengehäuse vorbereiten, Lager/Wellen einpressen", "experiences": "2-Schicht, hohe Team-Rückmeldung"},
+        {"company": "Team Time GmbH (Kunde: Hexagon Purus, Kassel)", "role": "Produktionsmitarbeiter / Qualitätskontrolle", "tasks": "Liner vermessen, Annealing-Prozess, Dichtheitsprüfung, Ventilmontage", "experiences": "3-Schicht; Allergiebedingte Einschränkungen bei einzelnen Prozessschritten"},
+        {"company": "Rehadapt GmbH, Kassel", "role": "Maschinenbediener / CNC-Anlernung", "tasks": "CNC-Dreh- und Fräsmaschinen bedienen, messen, entgraten, Anlagenbeobachtung", "experiences": "Sinumerik-Umgebung, Zyklusbetrieb, Probezeit-Erfahrung"},
+        {"company": "Adecco Personaldienstleistungen GmbH (Kunde: KVG, Kassel)", "role": "Produktionshelfer / Instandhaltungsassistenz", "tasks": "Schienenbremsen und Gewichtsgeber einstellen, Reinigungs- und Hilfstätigkeiten", "experiences": "2-Schicht plus Nachtschicht"},
+        {"company": "Arbeitssuchend", "role": "Übergangsphase", "tasks": "aktive Bewerbungsphase", "experiences": "mehrere dokumentierte Zwischenphasen"},
+    ]
+
+
+def _normalize_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _empty_context_entry() -> Dict[str, str]:
+    return {
+        "company": "",
+        "role": "",
+        "tasks": "",
+        "experiences": "",
+        "liked": "",
+        "disliked": "",
+        "atmosphere": "",
+        "notes": "",
+    }
+
+
+def _sanitize_context_entry(entry: Dict[str, Any]) -> Dict[str, str]:
+    cleaned = _empty_context_entry()
+    for field in cleaned.keys():
+        cleaned[field] = _normalize_text(entry.get(field, ""))
+    return cleaned
+
+
+def _is_meaningful_context_entry(entry: Dict[str, str]) -> bool:
+    return bool(entry.get("company") or entry.get("role") or len(entry.get("tasks", "")) >= 12)
+
+
+def _entry_key(entry: Dict[str, str]) -> str:
+    company = re.sub(r"[^a-z0-9]+", "", (entry.get("company") or "").lower())
+    role = re.sub(r"[^a-z0-9]+", "", (entry.get("role") or "").lower())
+    if company or role:
+        return f"{company}|{role}"
+    tasks = re.sub(r"[^a-z0-9]+", "", (entry.get("tasks") or "").lower())[:40]
+    return f"tasks|{tasks}"
+
+
+def _merge_entries(primary: List[Dict[str, str]], secondary: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    merged: List[Dict[str, str]] = []
+    index: Dict[str, int] = {}
+
+    for raw in primary + secondary:
+        entry = _sanitize_context_entry(raw)
+        if not _is_meaningful_context_entry(entry):
+            continue
+
+        key = _entry_key(entry)
+        existing_idx = index.get(key)
+        if existing_idx is None:
+            index[key] = len(merged)
+            merged.append(entry)
+            continue
+
+        existing = merged[existing_idx]
+        for field, value in entry.items():
+            if value and not existing.get(field):
+                existing[field] = value
+
+    return merged
+
+
+def _split_experience_blocks(raw_text: str) -> List[str]:
+    lines = [_normalize_text(line) for line in (raw_text or "").split("\n")]
+    lines = [line for line in lines if line and not line.lower().startswith("sprachnotiz-ergänzung")]
+    if not lines:
+        return []
+
+    date_prefix = re.compile(r"^\s*(\d{2}\.\d{4}|\d{2}\.\d{2}\.\d{4}|\d{4})\s*(?:-|–|—|bis)\s*(\d{2}\.\d{4}|\d{2}\.\d{2}\.\d{4}|\d{4}|andauernd|heute|aktuell)", re.IGNORECASE)
+    company_like = re.compile(r"(gmbh|ag|ohg|kg|db\s|zeitarbeit|arbeitssuchend|weiterbildung|kvg|volkswagen|daimler|hexagon|rehadapt|adecco)", re.IGNORECASE)
+
+    blocks: List[List[str]] = []
+    current: List[str] = []
+
+    for line in lines:
+        start_new = bool(date_prefix.search(line))
+        if not start_new and company_like.search(line) and (line.endswith(":") or len(line) < 140):
+            start_new = True
+
+        if start_new and current:
+            blocks.append(current)
+            current = []
+
+        current.append(line)
+
+    if current:
+        blocks.append(current)
+
+    return ["\n".join(block) for block in blocks if block]
+
+
+def _guess_company_role(header: str) -> Dict[str, str]:
+    line = _normalize_text(header)
+    line = re.sub(r"^\s*(\d{2}\.\d{4}|\d{2}\.\d{2}\.\d{4}|\d{4})\s*(?:-|–|—|bis)\s*(\d{2}\.\d{4}|\d{2}\.\d{2}\.\d{4}|\d{4}|andauernd|heute|aktuell)\s*", "", line, flags=re.IGNORECASE)
+
+    if ":" in line:
+        left, right = [part.strip() for part in line.split(":", 1)]
+        if len(left) >= 3:
+            return {"company": left, "role": right}
+
+    if "," in line:
+        parts = [part.strip() for part in line.split(",") if part.strip()]
+        if len(parts) >= 2:
+            first, second = parts[0], parts[1]
+            if re.search(r"(gmbh|ag|ohg|kg|db\s|weiterbildung|arbeitssuchend)", second, flags=re.IGNORECASE):
+                return {"company": second, "role": first}
+            return {"company": first, "role": second}
+
+    if " bei " in line.lower():
+        role, company = re.split(r"\s+bei\s+", line, maxsplit=1, flags=re.IGNORECASE)
+        return {"company": company.strip(), "role": role.strip()}
+
+    if re.search(r"arbeitssuchend", line, flags=re.IGNORECASE):
+        return {"company": "Arbeitssuchend", "role": "Übergangsphase"}
+
+    return {"company": line[:120], "role": ""}
+
+
+def extract_resume_context_entries_heuristic(raw_text: str) -> List[Dict[str, str]]:
+    blocks = _split_experience_blocks(raw_text)
+    entries: List[Dict[str, str]] = []
+
+    for block in blocks:
+        lines = [line.strip("•▪️- ") for line in block.split("\n") if line.strip()]
+        if not lines:
+            continue
+
+        guessed = _guess_company_role(lines[0])
+        details = [line for line in lines[1:] if len(line) >= 3][:8]
+        tasks = "; ".join(details[:3])
+        experiences = "; ".join(details[3:6])
+
+        entries.append(
+            {
+                "company": guessed.get("company", ""),
+                "role": guessed.get("role", ""),
+                "tasks": tasks,
+                "experiences": experiences,
+                "liked": "",
+                "disliked": "",
+                "atmosphere": "",
+                "notes": "",
+            }
+        )
+
+    return _merge_entries(entries, [])
+
+
+def _blueprint_matches_from_text(raw_text: str) -> List[Dict[str, str]]:
+    lower = (raw_text or "").lower()
+    matches: List[Dict[str, str]] = []
+    for entry in default_station_blueprint():
+        name = (entry.get("company") or "").lower()
+        if not name:
+            continue
+        tokens = [tok for tok in re.split(r"[^a-z0-9äöüß]+", name) if len(tok) >= 4]
+        if not tokens:
+            continue
+        if any(tok in lower for tok in tokens[:3]):
+            matches.append(_sanitize_context_entry(entry))
+    return matches
+
+
+def extract_resume_context_entries_with_ai(raw_text: str, voice_text: str = "") -> Dict[str, Any]:
+    combined_text = (raw_text or "").strip()
+    if voice_text:
+        combined_text = f"{combined_text}\n\nSprachnotiz-Ergänzung:\n{voice_text.strip()}".strip()
+
+    heuristic_entries = extract_resume_context_entries_heuristic(combined_text)
+    blueprint_entries = _blueprint_matches_from_text(combined_text)
+
+    llm_entries: List[Dict[str, Any]] = []
+    llm_error = ""
+    prompt = f"""
+Analysiere den folgenden Text über berufliche Erfahrungen und extrahiere strukturierte Informationen für verschiedene Stationen.
+Wichtig:
+- Jede erkennbare Station als eigener Eintrag
+- Keine leeren Einträge
+- Falls Sprachnotiz-Details vorhanden sind, als Ergänzung nutzen
+Gib STRICT JSON zurück. Keine Markdown-Formatierung.
+Struktur: {{"entries": [{{ "company": "...", "role": "...", "tasks": "...", "experiences": "...", "liked": "...", "disliked": "...", "atmosphere": "...", "notes": "..." }}]}}
+
+Text:
+{combined_text[:15000]}
+""".strip()
+
+    try:
+        extracted = call_gemini_json(prompt)
+        llm_entries = extracted.get("entries") or []
+        if not isinstance(llm_entries, list):
+            llm_entries = []
+    except HTTPException as exc:
+        llm_error = str(exc.detail)
+    except Exception as exc:
+        llm_error = str(exc)
+
+    merged = _merge_entries(heuristic_entries, llm_entries)
+    merged = _merge_entries(merged, blueprint_entries)
+
+    return {
+        "entries": merged,
+        "meta": {
+            "heuristicCount": len(heuristic_entries),
+            "llmCount": len(llm_entries),
+            "blueprintHints": len(blueprint_entries),
+            "llmError": llm_error,
+            "voiceUsed": bool(_normalize_text(voice_text)),
+        },
     }
 
 
@@ -1880,16 +2120,33 @@ def apply_profile_to_project(project_id: str, profile_id: str):
     return result
 
 
+@app.get("/api/cover-letter/station-blueprint")
+def get_station_blueprint():
+    return {"entries": default_station_blueprint()}
+
+
+@app.post("/api/cover-letter/projects/{project_id}/resume-context-extract-text")
+def extract_resume_context_from_text(project_id: str, payload: ResumeContextExtractTextInput):
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    require_project(conn, project_id)
+    conn.close()
+
+    result = extract_resume_context_entries_with_ai(payload.resumeText, payload.voiceText or "")
+    return result
+
+
 @app.post("/api/cover-letter/projects/{project_id}/resume-context-extract")
 async def extract_resume_context_from_file(
     project_id: str,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    voiceText: Optional[str] = Form(None),
 ):
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     require_project(conn, project_id)
 
-    filename = file.filename.lower()
+    filename = (file.filename or "").lower()
     content = await file.read()
     raw_text = ""
 
@@ -1909,30 +2166,9 @@ async def extract_resume_context_from_file(
         conn.close()
         raise HTTPException(status_code=400, detail="Die Datei enthält keinen lesbaren Text")
 
-    prompt = f"""
-Analysiere den folgenden Text über berufliche Erfahrungen und extrahiere strukturierte Informationen für verschiedene Stationen.
-Gib STRICT JSON zurück. Keine Markdown-Formatierung.
-Struktur: {{"entries": [{{ "company": "...", "role": "...", "tasks": "...", "experiences": "...", "liked": "...", "disliked": "...", "atmosphere": "...", "notes": "..." }}]}}
-
-Text:
-{raw_text[:10000]}
-"""
-    
-    try:
-        extracted = call_gemini_json(prompt)
-        entries = extracted.get("entries") or []
-        if not isinstance(entries, list):
-            entries = []
-    except HTTPException:
-        # Re-raise existing HTTPExceptions (like Gemini API errors)
-        conn.close()
-        raise
-    except Exception as exc:
-        conn.close()
-        raise HTTPException(status_code=500, detail=f"Unerwarteter Fehler bei KI-Extraktion: {exc}")
-
     conn.close()
-    return {"entries": entries}
+    result = extract_resume_context_entries_with_ai(raw_text, voiceText or "")
+    return result
 
 
 @app.get("/api/ai-instructions")
