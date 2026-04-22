@@ -807,9 +807,13 @@
             const emptyContext = { company: "", role: "", tasks: "", experiences: "", liked: "", disliked: "", atmosphere: "", notes: "" };
             const [projects, setProjects] = useState([]);
             const [projectId, setProjectId] = useState("");
+            const [profiles, setProfiles] = useState([]);
+            const [selectedProfileId, setSelectedProfileId] = useState("");
+            const [profileName, setProfileName] = useState("");
             const [projectData, setProjectData] = useState(null);
             const [sourceType, setSourceType] = useState("link");
             const [sourceValue, setSourceValue] = useState("");
+            const [contactPerson, setContactPerson] = useState("");
             const [baselineText, setBaselineText] = useState("");
             const [baselineFile, setBaselineFile] = useState(null);
             const [resumeText, setResumeText] = useState("");
@@ -820,12 +824,74 @@
             const [maxRounds, setMaxRounds] = useState(6);
             const [jobConfirmed, setJobConfirmed] = useState(false);
             const [resumeConfirmed, setResumeConfirmed] = useState(false);
+            const [showValidationErrors, setShowValidationErrors] = useState(false);
             const [busy, setBusy] = useState(false);
             const [message, setMessage] = useState("");
 
             useEffect(() => {
                 loadProjects();
+                loadProfiles();
             }, []);
+
+            const loadProfiles = async () => {
+                try {
+                    const res = await fetch(`${API_BASE}/profiles`);
+                    const data = await res.json();
+                    setProfiles(data.profiles || []);
+                } catch (_err) { setProfiles([]); }
+            };
+
+            const saveCurrentAsProfile = async () => {
+                if (!profileName.trim()) {
+                    setMessage("Bitte einen Namen für das Profil vergeben.");
+                    return;
+                }
+                await withBusy(async () => {
+                    const res = await fetch(`${API_BASE}/profiles`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            profileName,
+                            resumeText,
+                            baselineLetter: baselineText,
+                            contextEntries: contextEntries
+                        })
+                    });
+                    if (!res.ok) throw new Error("Profil konnte nicht gespeichert werden.");
+                    await loadProfiles();
+                    setMessage("Profil erfolgreich gespeichert.");
+                    setProfileName("");
+                });
+            };
+
+            const applyProfile = async (profileId) => {
+                if (!projectId) {
+                    setMessage("Bitte zuerst ein Projekt erstellen oder laden.");
+                    return;
+                }
+                await withBusy(async () => {
+                    const res = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/apply-profile/${profileId}`, {
+                        method: "POST"
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || "Profil konnte nicht geladen werden.");
+                    syncFromPayload(data);
+                    
+                    // Sync local form states
+                    setResumeText(data.sources?.resumeText || "");
+                    setBaselineText(data.sources?.baselineLetter || "");
+                    setMessage("Profil erfolgreich in das Projekt geladen.");
+                });
+            };
+
+            const deleteProfile = async (id) => {
+                if (!confirm("Profil wirklich löschen?")) return;
+                await withBusy(async () => {
+                    await fetch(`${API_BASE}/profiles/${id}`, { method: "DELETE" });
+                    await loadProfiles();
+                    setMessage("Profil gelöscht.");
+                });
+            };
 
             const loadProjects = async () => {
                 try {
@@ -841,18 +907,41 @@
                 if (!data || !data.project) return;
                 setProjectId(data.project.id);
                 setProjectData(data);
+                
+                // Grunddaten des Projekts
+                setTargetScore(data.project.targetScore || 9);
+                setMaxRounds(data.project.maxRounds || 6);
                 setFeedback(data.project.latestFeedback || "");
-                if (Array.isArray(data.resumeContextEntries) && data.resumeContextEntries.length > 0) {
-                    setContextEntries(data.resumeContextEntries.map(entry => ({
-                        company: entry.company || "",
-                        role: entry.role || "",
-                        tasks: entry.tasks || "",
-                        experiences: entry.experiences || "",
-                        liked: entry.liked || "",
-                        disliked: entry.disliked || "",
-                        atmosphere: entry.atmosphere || "",
-                        notes: entry.notes || "",
-                    })));
+
+                // Quellen-Daten (Job, Anschreiben, Lebenslauf)
+                const sources = data.sources || {};
+                setSourceType(sources.jobSourceType || "link");
+                setSourceValue(sources.jobSourceValue || "");
+                
+                // Ansprechpartner aus der Job-Analyse
+                const analysis = sources.jobAnalysis || {};
+                setContactPerson(analysis.contactPerson || "");
+
+                // Texte aus den Sektionen 2 und 3
+                setBaselineText(sources.baselineLetter || "");
+                setResumeText(sources.resumeText || "");
+
+                // Kontext-Einträge aus Sektion 4
+                if (Array.isArray(data.resumeContextEntries)) {
+                    if (data.resumeContextEntries.length > 0) {
+                        setContextEntries(data.resumeContextEntries.map(entry => ({
+                            company: entry.company || "",
+                            role: entry.role || "",
+                            tasks: entry.tasks || "",
+                            experiences: entry.experiences || "",
+                            liked: entry.liked || "",
+                            disliked: entry.disliked || "",
+                            atmosphere: entry.atmosphere || "",
+                            notes: entry.notes || "",
+                        })));
+                    } else {
+                        setContextEntries([{ ...emptyContext }]);
+                    }
                 }
             };
 
@@ -862,7 +951,15 @@
                 try {
                     await fn();
                 } catch (err) {
-                    setMessage(err.message || "Aktion fehlgeschlagen.");
+                    // Versuche die Fehlermeldung vom Backend zu extrahieren
+                    let errMsg = err.message || "Aktion fehlgeschlagen.";
+                    if (err.response && err.response.json) {
+                        try {
+                            const data = await err.response.json();
+                            errMsg = data.detail || errMsg;
+                        } catch(e) {}
+                    }
+                    setMessage(errMsg);
                 } finally {
                     setBusy(false);
                 }
@@ -906,7 +1003,7 @@
                     const res = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/job-source`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ sourceType, sourceValue })
+                        body: JSON.stringify({ sourceType, sourceValue, contactPerson })
                     });
                     const data = await res.json();
                     if (!res.ok) throw new Error(data.detail || "Jobquelle konnte nicht gespeichert werden.");
@@ -1007,6 +1104,30 @@
                 });
             };
 
+            const extractContextFromFile = async (file) => {
+                if (!projectId) {
+                    setMessage("Bitte zuerst ein Projekt erstellen.");
+                    return;
+                }
+                if (!file) return;
+                await withBusy(async () => {
+                    const fd = new FormData();
+                    fd.append("file", file);
+                    const res = await fetch(`${API_BASE}/cover-letter/projects/${projectId}/resume-context-extract`, {
+                        method: "POST",
+                        body: fd
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || "Extraktion fehlgeschlagen.");
+                    if (data.entries && data.entries.length > 0) {
+                        setContextEntries(data.entries);
+                        setMessage(`${data.entries.length} Stationen extrahiert. Bitte prüfen und speichern.`);
+                    } else {
+                        setMessage("Keine Stationen im Text erkannt.");
+                    }
+                });
+            };
+
             const saveFeedback = async () => {
                 if (!projectId || !feedback.trim()) {
                     setMessage("Bitte Projekt und Feedback angeben.");
@@ -1026,12 +1147,14 @@
             };
 
             const generateDraft = async () => {
+                setShowValidationErrors(false);
                 if (!projectId) {
                     setMessage("Bitte zuerst ein Projekt erstellen.");
                     return;
                 }
                 if (!jobConfirmed || !resumeConfirmed) {
-                    setMessage("Bitte Stellenanalyse und Lebenslaufprüfung bestätigen.");
+                    setShowValidationErrors(true);
+                    setMessage("Bitte die oben stehenden Häkchen bei Punkt 1) und 3) setzen, um zu bestätigen, dass die Daten korrekt sind.");
                     return;
                 }
                 await withBusy(async () => {
@@ -1089,30 +1212,91 @@
                 <div className="space-y-8">
                     <section className="glass-card p-6 rounded-lg space-y-4">
                         <h2 className="text-sm font-bold uppercase tracking-widest text-brand-muted flex items-center gap-2">
+                            <Icon name="user" size={16} /> 0) Bewerberprofil (Lebenslauf-Vorlagen)
+                        </h2>
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+                            <div className="md:col-span-2 space-y-1">
+                                <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">Profil laden</label>
+                                <div className="flex gap-2">
+                                    <select 
+                                        value={selectedProfileId} 
+                                        onChange={e => setSelectedProfileId(e.target.value)}
+                                        className="input-premium flex-1 p-2 rounded text-sm"
+                                    >
+                                        <option value="">Profil wählen...</option>
+                                        {profiles.map(p => (
+                                            <option key={p.id} value={p.id}>{p.profileName} ({new Date(p.updatedAt).toLocaleDateString()})</option>
+                                        ))}
+                                    </select>
+                                    <button 
+                                        disabled={!selectedProfileId || busy} 
+                                        onClick={() => applyProfile(selectedProfileId)}
+                                        className="glass-card px-4 py-2 rounded text-xs uppercase tracking-wide flex items-center gap-2"
+                                    >
+                                        <Icon name="download" size={14} /> Laden
+                                    </button>
+                                    <button 
+                                        disabled={!selectedProfileId || busy} 
+                                        onClick={() => deleteProfile(selectedProfileId)}
+                                        className="glass-card px-2 py-2 rounded text-xs uppercase text-red-400 hover:text-red-300"
+                                    >
+                                        <Icon name="trash-2" size={14} />
+                                    </button>
+                                </div>
+                            </div>
+                            <div className="md:col-span-2 space-y-1">
+                                <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">Aktuellen Stand als Profil speichern</label>
+                                <div className="flex gap-2">
+                                    <input 
+                                        value={profileName}
+                                        onChange={e => setProfileName(e.target.value)}
+                                        placeholder="Name (z.B. IT-Systemhaus)" 
+                                        className="input-premium flex-1 p-2 rounded text-sm" 
+                                    />
+                                    <button 
+                                        disabled={busy} 
+                                        onClick={saveCurrentAsProfile}
+                                        className="btn-premium px-4 py-2 rounded text-xs uppercase tracking-wide flex items-center gap-2"
+                                    >
+                                        <Icon name="save" size={14} /> Speichern
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section className="glass-card p-6 rounded-lg space-y-4">
+                        <h2 className="text-sm font-bold uppercase tracking-widest text-brand-muted flex items-center gap-2">
                             <Icon name="sparkles" size={16} /> KI Anschreiben Studio
                         </h2>
-                        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                            <input
-                                type="number"
-                                min="1"
-                                max="10"
-                                step="0.1"
-                                value={targetScore}
-                                onChange={e => setTargetScore(parseFloat(e.target.value) || 9)}
-                                className="input-premium p-2 rounded text-sm"
-                                placeholder="Zielscore"
-                            />
-                            <input
-                                type="number"
-                                min="1"
-                                max="20"
-                                value={maxRounds}
-                                onChange={e => setMaxRounds(parseInt(e.target.value, 10) || 6)}
-                                className="input-premium p-2 rounded text-sm"
-                                placeholder="Max Runden"
-                            />
-                            <button onClick={createProject} className="btn-premium px-4 py-2 rounded text-xs uppercase tracking-wide">Neues Projekt</button>
-                            <button onClick={loadProjects} className="glass-card px-4 py-2 rounded text-xs uppercase tracking-wide">Projekte laden</button>
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+                            <div className="space-y-1">
+                                <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">Ziel-Qualität (1-10)</label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="10"
+                                    step="0.1"
+                                    value={targetScore}
+                                    onChange={e => setTargetScore(parseFloat(e.target.value) || 9)}
+                                    className="input-premium w-full p-2 rounded text-sm"
+                                    placeholder="Zielscore"
+                                />
+                            </div>
+                            <div className="space-y-1">
+                                <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">KI-Überarbeitungsrunden</label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="20"
+                                    value={maxRounds}
+                                    onChange={e => setMaxRounds(parseInt(e.target.value, 10) || 6)}
+                                    className="input-premium w-full p-2 rounded text-sm"
+                                    placeholder="Max Runden"
+                                />
+                            </div>
+                            <button onClick={createProject} className="btn-premium px-4 py-2 h-[38px] rounded text-xs uppercase tracking-wide">Neues Projekt</button>
+                            <button onClick={loadProjects} className="glass-card px-4 py-2 h-[38px] rounded text-xs uppercase tracking-wide">Projekte laden</button>
                         </div>
                         <div className="flex flex-wrap gap-2">
                             {projects.map(p => (
@@ -1142,8 +1326,17 @@
                                 className="input-premium p-2 rounded text-sm md:col-span-2"
                                 placeholder={sourceType === 'link' ? 'https://...' : 'Text aus der Stellenanzeige einfügen'}
                             />
+                            <div className="flex flex-col space-y-1">
+                                <label className="text-[10px] font-bold uppercase tracking-widest text-brand-muted">Ansprechpartner (optional)</label>
+                                <input 
+                                    value={contactPerson}
+                                    onChange={e => setContactPerson(e.target.value)}
+                                    placeholder="z.B. Frau Müller"
+                                    className="input-premium p-2 rounded text-sm"
+                                />
+                            </div>
                             <button disabled={busy} onClick={saveJobSource} className="btn-premium px-4 py-2 rounded text-xs uppercase tracking-wide">
-                                Quelle speichern
+                                Quelle & Name speichern
                             </button>
                         </div>
                         <button disabled={busy || !projectId} onClick={analyzeStoredLink} className="glass-card px-4 py-2 rounded text-xs uppercase tracking-wide">
@@ -1152,12 +1345,13 @@
                         <div className="p-3 rounded border border-brand-border bg-white/5 text-sm space-y-1">
                             <div><strong>Firma:</strong> {analysis.companyName || "-"}</div>
                             <div><strong>Stelle:</strong> {analysis.jobTitle || "-"}</div>
+                            <div><strong>Ansprechpartner:</strong> {analysis.contactPerson || "Damen und Herren (Fallback)"}</div>
                             <div><strong>Kundentyp:</strong> {analysis.isTempWork ? "Zeitarbeit" : "Reguläre Firma/Unklar"}</div>
                             <div><strong>Kunden:</strong> {analysis.customers || "-"}</div>
                             <div><strong>Unternehmensprofil:</strong> {analysis.companySummary || "-"}</div>
                             <div><strong>Anforderungen:</strong> {(analysis.requirements || []).join(" | ") || "-"}</div>
                         </div>
-                        <label className="flex items-center gap-2 text-xs text-brand-muted">
+                        <label className={`flex items-center gap-2 text-xs p-2 rounded transition-colors ${showValidationErrors && !jobConfirmed ? 'bg-red-500/20 border border-red-500 text-red-200' : 'text-brand-muted'}`}>
                             <input type="checkbox" checked={jobConfirmed} onChange={e => setJobConfirmed(e.target.checked)} />
                             Analyse geprüft und bestätigt
                         </label>
@@ -1184,7 +1378,7 @@
                             <div><strong>Stationen:</strong> {(resumeSummary.stationHints || []).join(" | ") || "-"}</div>
                             <div><strong>Skills:</strong> {(resumeSummary.skills || []).join(", ") || "-"}</div>
                         </div>
-                        <label className="flex items-center gap-2 text-xs text-brand-muted">
+                        <label className={`flex items-center gap-2 text-xs p-2 rounded transition-colors ${showValidationErrors && !resumeConfirmed ? 'bg-red-500/20 border border-red-500 text-red-200' : 'text-brand-muted'}`}>
                             <input type="checkbox" checked={resumeConfirmed} onChange={e => setResumeConfirmed(e.target.checked)} />
                             Lebenslaufdaten geprüft und bestätigt
                         </label>
@@ -1192,6 +1386,18 @@
 
                     <section className="glass-card p-6 rounded-lg space-y-4">
                         <h3 className="text-xs font-bold uppercase tracking-widest text-brand-muted">4) Kontext pro Station</h3>
+                        
+                        <div className="p-4 border-2 border-dashed border-brand-border rounded hover:border-brand-muted transition-colors relative flex flex-col items-center gap-2 mb-4">
+                            <Icon name="file-text" size={24} className="text-brand-muted" />
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-brand-muted">Erfahrungen aus .txt oder .pdf Datei extrahieren</span>
+                            <input 
+                                type="file" 
+                                accept=".txt,.pdf" 
+                                onChange={e => extractContextFromFile(e.target.files[0])} 
+                                className="absolute inset-0 opacity-0 cursor-pointer" 
+                            />
+                        </div>
+
                         <div className="space-y-3">
                             {contextEntries.map((entry, idx) => (
                                 <div key={idx} className="p-3 rounded border border-brand-border bg-white/5 space-y-2">
@@ -1251,6 +1457,18 @@
                             </div>
                         )}
                     </section>
+
+                    {busy && (
+                        <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm transition-opacity">
+                            <div className="w-64 space-y-4 text-center">
+                                <div className="relative h-1 w-full bg-brand-border rounded-full overflow-hidden">
+                                    <div className="absolute inset-0 bg-white animate-[loading_2s_infinite_linear]" style={{ width: '50%', backgroundSize: '200% 100%' }}></div>
+                                </div>
+                                <div className="text-xs font-bold uppercase tracking-[0.2em] text-white animate-pulse">KI generiert Anschreiben...</div>
+                                <div className="text-[10px] text-brand-muted">Dieser Vorgang kann bis zu 60 Sekunden dauern</div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         }
