@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 import uuid
 from datetime import date, datetime, timezone
 from enum import Enum
@@ -16,6 +17,30 @@ from html import unescape
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+# --- .env Loader ---
+def load_dotenv():
+    env_path = Path(".env")
+    if env_path.exists():
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    # Extrem wichtig: Anführungszeichen und Leerzeichen entfernen
+                    os.environ[key.strip()] = value.strip().strip('"').strip("'")
+    
+    # Debug-Info
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    print(f"--- KONFIGURATION GEPRÜFT ---")
+    print(f"Primäres Modell: {model}")
+    print(f"API-Key geladen: {'JA' if api_key else 'NEIN'} (Länge: {len(api_key)})")
+    print(f"-----------------------------")
+
+load_dotenv()
 
 # WICHTIG: pypdf muss installiert sein für die PDF Extraktion
 from pypdf import PdfReader
@@ -43,6 +68,24 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    from fastapi import HTTPException as FastAPIHTTPException
+    if isinstance(exc, FastAPIHTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+        )
+    import traceback
+    print(f"GLOBAL ERROR: {exc}")
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Interner Serverfehler: {str(exc)}", "traceback": traceback.format_exc()},
+    )
+
+from fastapi.responses import JSONResponse
 
 DB_FILE = "bewerbungen.db"
 UPLOAD_DIR = "uploads"
@@ -180,6 +223,38 @@ def init_db():
         '''
     )
 
+    c.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS applicant_profiles (
+            id TEXT PRIMARY KEY,
+            profileName TEXT NOT NULL,
+            resumeText TEXT DEFAULT '',
+            resumeSummaryJson TEXT DEFAULT '',
+            baselineLetter TEXT DEFAULT '',
+            updatedAt TEXT NOT NULL
+        )
+        '''
+    )
+
+    c.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS applicant_profile_context_entries (
+            id TEXT PRIMARY KEY,
+            profileId TEXT NOT NULL,
+            sortOrder INTEGER NOT NULL DEFAULT 0,
+            company TEXT DEFAULT '',
+            role TEXT DEFAULT '',
+            tasks TEXT DEFAULT '',
+            experiences TEXT DEFAULT '',
+            liked TEXT DEFAULT '',
+            disliked TEXT DEFAULT '',
+            atmosphere TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            FOREIGN KEY(profileId) REFERENCES applicant_profiles(id)
+        )
+        '''
+    )
+
     conn.commit()
     conn.close()
 
@@ -257,6 +332,7 @@ class CoverLetterProjectCreate(BaseModel):
 class CoverLetterJobSourceInput(BaseModel):
     sourceType: str
     sourceValue: str
+    contactPerson: Optional[str] = ""
 
     @field_validator("sourceType")
     @classmethod
@@ -315,6 +391,33 @@ class CoverLetterIterateInput(BaseModel):
     targetScore: Optional[float] = None
     maxRounds: Optional[int] = None
     feedback: Optional[str] = None
+
+
+class ApplicantProfileContextEntryInput(BaseModel):
+    company: Optional[str] = ""
+    role: Optional[str] = ""
+    tasks: Optional[str] = ""
+    experiences: Optional[str] = ""
+    liked: Optional[str] = ""
+    disliked: Optional[str] = ""
+    atmosphere: Optional[str] = ""
+    notes: Optional[str] = ""
+
+
+class ApplicantProfileInput(BaseModel):
+    id: Optional[str] = None
+    profileName: str
+    resumeText: Optional[str] = ""
+    baselineLetter: Optional[str] = ""
+    contextEntries: List[ApplicantProfileContextEntryInput] = Field(default_factory=list)
+
+    @field_validator("profileName")
+    @classmethod
+    def validate_profile_name(cls, value):
+        clean = (value or "").strip()
+        if not clean:
+            raise ValueError("Profilname darf nicht leer sein")
+        return clean
 
 
 # --- Hilfsfunktionen ---
@@ -497,14 +600,20 @@ def analyze_job_text(source_text: str, source_url: str = "", page_title: str = "
         "companySummary": summary_line,
         "customers": extract_customers(source_text),
         "isTempWork": is_temp,
+        "contactPerson": "", # Neues Feld
     }
 
     # Falls Gemini verfügbar: strukturierte Nachschärfung auf Basis des gelesenen Textes.
-    if os.getenv("GEMINI_API_KEY", "").strip():
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if api_key:
         prompt = f"""
 Analysiere die folgende Stellenanzeige und gib STRICT JSON zurück.
 Keine Markdown-Formatierung, nur ein JSON-Objekt mit exakt diesen Schlüsseln:
-companyName (string), jobTitle (string), requirements (array of strings), companySummary (string), customers (string), isTempWork (boolean).
+companyName (string), jobTitle (string), requirements (array of strings), companySummary (string), customers (string), isTempWork (boolean), contactPerson (string).
+
+WICHTIG für contactPerson: 
+Suche nach einem konkreten Ansprechpartner (z.B. "Frau Müller" oder "Herr Schmidt"). 
+Wenn kein Name gefunden wird, lass das Feld leer ("").
 
 URL: {source_url or 'n/a'}
 Titel: {page_title or 'n/a'}
@@ -524,8 +633,7 @@ Textauszug:
             result["customers"] = str(llm.get("customers") or result["customers"]).strip()
             if isinstance(llm.get("isTempWork"), bool):
                 result["isTempWork"] = llm["isTempWork"]
-        except HTTPException:
-            pass
+            result["contactPerson"] = str(llm.get("contactPerson") or "").strip()
         except Exception:
             pass
 
@@ -599,42 +707,68 @@ def call_gemini_text(prompt: str, temperature: float = 0.25) -> str:
     if not api_key:
         raise HTTPException(status_code=503, detail="GEMINI_API_KEY ist nicht gesetzt")
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": temperature,
-            "topP": 0.95,
-            "maxOutputTokens": 4096,
-        },
-    }
+    # Liste der zu testenden Modelle (Bestes -> Fallback)
+    preferred_model = os.getenv("GEMINI_MODEL", "").strip()
+    models_to_try = []
+    if preferred_model:
+        models_to_try.append(preferred_model)
+    
+    # Standard-Kaskade (Priorisierung von 1.5-flash für maximale Kompatibilität im Free-Tier)
+    for m in ["gemini-1.5-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro", "gemini-1.0-pro"]:
+        if m not in models_to_try:
+            models_to_try.append(m)
 
-    req = Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    last_error = "Keine Modelle zum Testen vorhanden"
+    saw_temporary_upstream_issue = False
 
-    try:
-        with urlopen(req, timeout=60) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError) as exc:
-        raise HTTPException(status_code=502, detail=f"Gemini API Fehler: {exc}")
+    for model_name in models_to_try:
+        # Wir probieren erst v1beta, dann v1 (Fallback-URLs)
+        for api_version in ["v1beta", "v1"]:
+            url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:generateContent?key={api_key}"
+            body = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": temperature,
+                    "topP": 0.95,
+                    "maxOutputTokens": 8192,
+                },
+            }
 
-    candidates = payload.get("candidates") or []
-    if not candidates:
-        raise HTTPException(status_code=502, detail="Gemini API lieferte keine Kandidaten")
+            try:
+                req = Request(url, data=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+                with urlopen(req, timeout=90) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
 
-    content = candidates[0].get("content") or {}
-    parts = content.get("parts") or []
-    if not parts:
-        raise HTTPException(status_code=502, detail="Gemini API lieferte keinen Text")
+                    # Extrahiere Text (robust)
+                    candidates = payload.get("candidates") or []
+                    if candidates:
+                        content = candidates[0].get("content") or {}
+                        parts = content.get("parts") or []
+                        if parts:
+                            text = parts[0].get("text", "")
+                            if text.strip():
+                                print(f"--- KI ERFOLG --- Modell: {model_name} ({api_version})")
+                                return text
+            except HTTPError as exc:
+                err_body = exc.read().decode("utf-8", errors="ignore")
+                last_error = f"Modell {model_name} ({api_version}) Fehler {exc.code}: {err_body}"
+                print(f"DEBUG: {last_error}")
+                if exc.code in (429, 503):
+                    saw_temporary_upstream_issue = True
+                continue
+            except Exception as exc:
+                last_error = f"Verbindungsfehler {model_name} ({api_version}): {exc}"
+                print(f"DEBUG: {last_error}")
+                continue
 
-    text = "\n".join(str(p.get("text", "")) for p in parts if p.get("text"))
-    if not text.strip():
-        raise HTTPException(status_code=502, detail="Gemini API lieferte leeren Text")
-    return text
+    # Wenn wir hier landen, haben alle Versuche versagt
+    if saw_temporary_upstream_issue:
+        raise HTTPException(
+            status_code=503,
+            detail=f"KI-Dienst temporär nicht verfügbar (Quota/Überlastung). Letzter Fehler: {last_error}",
+        )
+
+    raise HTTPException(status_code=502, detail=f"KI-Dienst nicht erreichbar. Letzter Fehler: {last_error}")
 
 
 def call_gemini_json(prompt: str, temperature: float = 0.25) -> Dict[str, Any]:
@@ -716,7 +850,16 @@ def generate_cover_letter_round(
 Du bist ein Bewerbungs-Coach-System. Erstelle und optimiere ein Anschreiben in deutscher Sprache.
 Es MUSS die Bewerberperspektive authentisch bewahren.
 
+WICHTIG FÜR DIE ANREDE:
+Ansprechpartner aus der Stellenanzeige: {job_analysis.get('contactPerson') or 'Keiner gefunden'}
+Falls ein Name oben steht (z.B. "Herr Schmidt"), verwende zwingend: "Sehr geehrter Herr Schmidt,".
+Falls eine Dame (z.B. "Frau Müller"), verwende zwingend: "Sehr geehrte Frau Müller,".
+Falls leer oder "Keiner gefunden", verwende zwingend: "Sehr geehrte Damen und Herren,".
+IGNORIERE jeden anderen Namen, der eventuell im "Bisherigen Anschreiben" steht.
+
 Verwende diese 4 Perspektiven für Bewertung und Verbesserung:
+...
+
 1) Bewerber-Treue (Authentizität, echte Stärken, glaubwürdige Sprache)
 2) Recruiter-Fit (Klarheit, Relevanz, Struktur)
 3) Fach-Fit (Passung auf Stelle/Anforderungen)
@@ -822,6 +965,9 @@ def run_cover_letter_auto_loop(
     rounds = []
 
     for step in range(1, max_rounds + 1):
+        if step > 1:
+            time.sleep(2) # Kurze Pause für Rate-Limits (RPM) im Free Tier
+            
         result = generate_cover_letter_round(
             job_analysis=job_analysis,
             baseline_letter=baseline_letter,
@@ -1116,6 +1262,7 @@ async def extract_from_pdf(file: UploadFile = File(...)):
 # --- API Endpunkte (Cover Letter KI) ---
 @app.post("/api/cover-letter/projects")
 def create_cover_letter_project(payload: CoverLetterProjectCreate):
+
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -1139,6 +1286,7 @@ def create_cover_letter_project(payload: CoverLetterProjectCreate):
 
 @app.get("/api/cover-letter/projects")
 def list_cover_letter_projects():
+
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -1156,6 +1304,7 @@ def list_cover_letter_projects():
 
 @app.get("/api/cover-letter/projects/{project_id}")
 def get_cover_letter_project(project_id: str):
+
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     result = collect_cover_letter_project(conn, project_id)
@@ -1165,6 +1314,7 @@ def get_cover_letter_project(project_id: str):
 
 @app.post("/api/cover-letter/projects/{project_id}/job-source")
 def set_cover_letter_job_source(project_id: str, payload: CoverLetterJobSourceInput):
+
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
 
@@ -1187,12 +1337,24 @@ def set_cover_letter_job_source(project_id: str, payload: CoverLetterJobSourceIn
 
     if payload.sourceType == "text":
         analysis = analyze_job_text(source_value)
+        if payload.contactPerson:
+            analysis["contactPerson"] = payload.contactPerson
         cur.execute(
             "UPDATE cover_letter_sources SET jobAnalysisJson=? WHERE projectId=?",
             (json.dumps(analysis, ensure_ascii=False), project_id),
         )
     else:
-        analysis = {}
+        # Falls ein Link gespeichert wird, laden wir die bestehende Analyse (falls vorhanden) 
+        # und aktualisieren nur den Ansprechpartner, falls übergeben.
+        cur.execute("SELECT jobAnalysisJson FROM cover_letter_sources WHERE projectId=?", (project_id,))
+        row = cur.fetchone()
+        analysis = safe_json_loads(row[0] if row else "", {})
+        if payload.contactPerson:
+            analysis["contactPerson"] = payload.contactPerson
+            cur.execute(
+                "UPDATE cover_letter_sources SET jobAnalysisJson=? WHERE projectId=?",
+                (json.dumps(analysis, ensure_ascii=False), project_id),
+            )
 
     cur.execute("UPDATE cover_letter_projects SET updatedAt=? WHERE id=?", (now_iso(), project_id))
     conn.commit()
@@ -1204,6 +1366,7 @@ def set_cover_letter_job_source(project_id: str, payload: CoverLetterJobSourceIn
 
 @app.post("/api/cover-letter/projects/{project_id}/analyze-job-link")
 def analyze_cover_letter_job_link(project_id: str, payload: CoverLetterAnalyzeLinkInput):
+
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
 
@@ -1250,6 +1413,7 @@ async def set_cover_letter_baseline(
     text: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
 ):
+
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     require_project(conn, project_id)
@@ -1297,6 +1461,7 @@ async def set_cover_letter_baseline(
 
 @app.post("/api/cover-letter/projects/{project_id}/resume")
 async def set_cover_letter_resume(
+
     project_id: str,
     text: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
@@ -1362,6 +1527,7 @@ async def set_cover_letter_resume(
 
 @app.post("/api/cover-letter/projects/{project_id}/resume-context")
 def set_cover_letter_resume_context(project_id: str, payload: CoverLetterResumeContextInput):
+
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     require_project(conn, project_id)
@@ -1401,6 +1567,7 @@ def set_cover_letter_resume_context(project_id: str, payload: CoverLetterResumeC
 
 @app.post("/api/cover-letter/projects/{project_id}/generate")
 def generate_cover_letter(project_id: str, payload: CoverLetterGenerateInput = CoverLetterGenerateInput()):
+
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     project = require_project(conn, project_id)
@@ -1522,6 +1689,217 @@ def export_cover_letter_txt(project_id: str):
             "Content-Disposition": f'attachment; filename="anschreiben_{project_id[:8]}.txt"'
         },
     )
+
+
+# --- API Endpunkte (Bewerberprofile) ---
+@app.get("/api/profiles")
+def list_profiles():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT id, profileName, updatedAt FROM applicant_profiles ORDER BY updatedAt DESC")
+    rows = [sqlite_row_to_dict(r) for r in cur.fetchall()]
+    conn.close()
+    return {"profiles": rows}
+
+
+@app.get("/api/profiles/{profile_id}")
+def get_profile(profile_id: str):
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    
+    cur.execute("SELECT * FROM applicant_profiles WHERE id=?", (profile_id,))
+    profile_row = sqlite_row_to_dict(cur.fetchone())
+    if not profile_row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Profil nicht gefunden")
+    
+    cur.execute(
+        "SELECT * FROM applicant_profile_context_entries WHERE profileId=? ORDER BY sortOrder ASC, id ASC",
+        (profile_id,)
+    )
+    context_rows = [sqlite_row_to_dict(r) for r in cur.fetchall()]
+    
+    profile_row["resumeSummary"] = safe_json_loads(profile_row.get("resumeSummaryJson"), {})
+    profile_row.pop("resumeSummaryJson", None)
+    
+    conn.close()
+    return {**profile_row, "contextEntries": context_rows}
+
+
+@app.post("/api/profiles")
+def save_profile(payload: ApplicantProfileInput):
+
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    
+    profile_id = payload.id or str(uuid.uuid4())
+    now = now_iso()
+    
+    summary = parse_resume_summary(payload.resumeText or "")
+    
+    # Check if update or create
+    cur.execute("SELECT id FROM applicant_profiles WHERE id=?", (profile_id,))
+    if cur.fetchone():
+        cur.execute(
+            "UPDATE applicant_profiles SET profileName=?, resumeText=?, resumeSummaryJson=?, baselineLetter=?, updatedAt=? WHERE id=?",
+            (payload.profileName, payload.resumeText, json.dumps(summary, ensure_ascii=False), payload.baselineLetter, now, profile_id)
+        )
+    else:
+        cur.execute(
+            "INSERT INTO applicant_profiles (id, profileName, resumeText, resumeSummaryJson, baselineLetter, updatedAt) VALUES (?, ?, ?, ?, ?, ?)",
+            (profile_id, payload.profileName, payload.resumeText, json.dumps(summary, ensure_ascii=False), payload.baselineLetter, now)
+        )
+    
+    cur.execute("DELETE FROM applicant_profile_context_entries WHERE profileId=?", (profile_id,))
+    for idx, entry in enumerate(payload.contextEntries):
+        cur.execute(
+            '''
+            INSERT INTO applicant_profile_context_entries
+            (id, profileId, sortOrder, company, role, tasks, experiences, liked, disliked, atmosphere, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                str(uuid.uuid4()),
+                profile_id,
+                idx,
+                entry.company or "",
+                entry.role or "",
+                entry.tasks or "",
+                entry.experiences or "",
+                entry.liked or "",
+                entry.disliked or "",
+                entry.atmosphere or "",
+                entry.notes or "",
+            )
+        )
+    
+    conn.commit()
+    conn.close()
+    return {"id": profile_id, "message": "Profil gespeichert"}
+
+
+@app.delete("/api/profiles/{profile_id}")
+def delete_profile(profile_id: str):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM applicant_profile_context_entries WHERE profileId=?", (profile_id,))
+    cur.execute("DELETE FROM applicant_profiles WHERE id=?", (profile_id,))
+    conn.commit()
+    conn.close()
+    return {"message": "Profil gelöscht"}
+
+
+@app.post("/api/cover-letter/projects/{project_id}/apply-profile/{profile_id}")
+def apply_profile_to_project(project_id: str, profile_id: str):
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    
+    require_project(conn, project_id)
+    ensure_project_sources_row(conn, project_id)
+    
+    cur.execute("SELECT * FROM applicant_profiles WHERE id=?", (profile_id,))
+    profile = sqlite_row_to_dict(cur.fetchone())
+    if not profile:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Profil nicht gefunden")
+    
+    cur.execute("SELECT * FROM applicant_profile_context_entries WHERE profileId=? ORDER BY sortOrder ASC", (profile_id,))
+    context_entries = [sqlite_row_to_dict(r) for r in cur.fetchall()]
+    
+    # Update project sources
+    cur.execute(
+        "UPDATE cover_letter_sources SET resumeText=?, resumeSummaryJson=?, baselineLetter=? WHERE projectId=?",
+        (profile["resumeText"], profile["resumeSummaryJson"], profile["baselineLetter"], project_id)
+    )
+    
+    # Update project context entries
+    cur.execute("DELETE FROM cover_letter_resume_context_entries WHERE projectId=?", (project_id,))
+    for idx, entry in enumerate(context_entries):
+        cur.execute(
+            '''
+            INSERT INTO cover_letter_resume_context_entries
+            (id, projectId, sortOrder, company, role, tasks, experiences, liked, disliked, atmosphere, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                str(uuid.uuid4()),
+                project_id,
+                idx,
+                entry.company or "",
+                entry.role or "",
+                entry.tasks or "",
+                entry.experiences or "",
+                entry.liked or "",
+                entry.disliked or "",
+                entry.atmosphere or "",
+                entry.notes or "",
+            )
+        )
+    
+    cur.execute("UPDATE cover_letter_projects SET updatedAt=? WHERE id=?", (now_iso(), project_id))
+    conn.commit()
+    
+    result = collect_cover_letter_project(conn, project_id)
+    conn.close()
+    return result
+
+
+@app.post("/api/cover-letter/projects/{project_id}/resume-context-extract")
+async def extract_resume_context_from_file(
+    project_id: str,
+    file: UploadFile = File(...)
+):
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    require_project(conn, project_id)
+
+    filename = file.filename.lower()
+    content = await file.read()
+    raw_text = ""
+
+    if filename.endswith(".txt"):
+        raw_text = content.decode("utf-8", errors="ignore").strip()
+    elif filename.endswith(".pdf"):
+        try:
+            raw_text = extract_text_from_pdf_bytes(content)
+        except Exception as e:
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"PDF konnte nicht gelesen werden: {e}")
+    else:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Nur .txt oder .pdf Dateien werden unterstützt")
+
+    if not raw_text:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Die Datei enthält keinen lesbaren Text")
+
+    prompt = f"""
+Analysiere den folgenden Text über berufliche Erfahrungen und extrahiere strukturierte Informationen für verschiedene Stationen.
+Gib STRICT JSON zurück. Keine Markdown-Formatierung.
+Struktur: {{"entries": [{{ "company": "...", "role": "...", "tasks": "...", "experiences": "...", "liked": "...", "disliked": "...", "atmosphere": "...", "notes": "..." }}]}}
+
+Text:
+{raw_text[:10000]}
+"""
+    
+    try:
+        extracted = call_gemini_json(prompt)
+        entries = extracted.get("entries") or []
+        if not isinstance(entries, list):
+            entries = []
+    except HTTPException:
+        # Re-raise existing HTTPExceptions (like Gemini API errors)
+        conn.close()
+        raise
+    except Exception as exc:
+        conn.close()
+        raise HTTPException(status_code=500, detail=f"Unerwarteter Fehler bei KI-Extraktion: {exc}")
+
+    conn.close()
+    return {"entries": entries}
 
 
 @app.get("/api/ai-instructions")

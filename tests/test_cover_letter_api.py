@@ -129,7 +129,8 @@ def test_cover_letter_analyze_link_uses_target_page(client, monkeypatch):
     assert analysis["companyName"] != ""
 
 
-def test_cover_letter_generate_requires_gemini_without_mock(client):
+def test_cover_letter_generate_requires_gemini_without_mock(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     create_res = client.post("/api/cover-letter/projects", json={})
     project_id = create_res.json()["project"]["id"]
 
@@ -149,6 +150,31 @@ def test_cover_letter_generate_requires_gemini_without_mock(client):
     gen_res = client.post(f"/api/cover-letter/projects/{project_id}/generate", json={})
     assert gen_res.status_code == 503
     assert "GEMINI_API_KEY" in gen_res.json()["detail"]
+
+
+def test_call_gemini_text_maps_upstream_503_to_503(monkeypatch):
+    import io
+    from urllib.error import HTTPError
+
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-key")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-test-model")
+
+    def fake_urlopen(_req, timeout=90):
+        _ = timeout
+        raise HTTPError(
+            url="https://example.invalid",
+            code=503,
+            msg="Service Unavailable",
+            hdrs=None,
+            fp=io.BytesIO(b"{\"error\":{\"code\":503,\"status\":\"UNAVAILABLE\"}}"),
+        )
+
+    monkeypatch.setattr(api, "urlopen", fake_urlopen)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.call_gemini_text("test prompt")
+
+    assert exc_info.value.status_code == 503
 
 
 def test_cover_letter_iterate_with_feedback_uses_multiple_rounds(client, monkeypatch):
